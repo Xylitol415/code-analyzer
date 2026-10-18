@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChatMessage, SseEventName, ToolCall } from "../types";
-import { askStream, createSession, deleteSession, type ServerConfig } from "../api/client";
+import { askStream, createSession, deleteSession, type ServerConfig, type SessionModel } from "../api/client";
 
 const GREETING_PROMPT =
   "会话已建立。请用简短友好的中文向用户打个招呼，介绍你是只读的代码逻辑分析助手，能帮他分析项目整体架构、追踪调用链、解释某段代码逻辑、查看代码演进历史等，并邀请他开始提问。不要冗长。";
@@ -12,7 +12,7 @@ export interface UseChatApi {
   sessionId: string | null;
   modelLabel: string | null;
   streaming: boolean;
-  connect: (project: string, resume: boolean, modelId?: string) => Promise<void>;
+  connect: (project: string, resume: boolean, model?: SessionModel) => Promise<void>;
   send: (question: string) => Promise<void>;
   stop: () => void;
   newSession: () => void;
@@ -23,6 +23,7 @@ interface Buffer {
   thinking: string;
   tools: ToolCall[];
   error?: string;
+  stopped?: boolean;
 }
 
 interface ActiveSession {
@@ -65,6 +66,7 @@ export function useChat(config: ServerConfig): UseChatApi {
               thinking: buf.thinking,
               tools: [...buf.tools],
               error: buf.error,
+              stopped: buf.stopped,
               streaming: finalize ? false : m.streaming,
             }
           : m,
@@ -80,10 +82,11 @@ export function useChat(config: ServerConfig): UseChatApi {
     }, 60);
   }, [flushBuffer]);
 
-  const stopStream = useCallback((updateState = true) => {
+  const stopStream = useCallback((updateState = true, stopped = false) => {
     const stream = streamRef.current;
     if (!stream) return;
     if (stream.flushTimer !== null) window.clearTimeout(stream.flushTimer);
+    if (stopped) stream.buffer.stopped = true;
     if (updateState) flushBuffer(stream, true);
     // Revoke ownership before abort resolves the old request's promise.
     streamRef.current = null;
@@ -210,11 +213,11 @@ export function useChat(config: ServerConfig): UseChatApi {
   );
 
   const connect = useCallback(
-    async (project: string, resume: boolean, modelId?: string) => {
+    async (project: string, resume: boolean, model?: SessionModel) => {
       resetSession();
       const version = connectionVersionRef.current;
       const sessionConfig = { ...config };
-      const s = await createSession(sessionConfig, project, resume, modelId);
+      const s = await createSession(sessionConfig, project, resume, model);
       const session = { id: s.id, config: sessionConfig };
       // A reset, newer connect, or unmount may have happened while POST was pending.
       if (connectionVersionRef.current !== version) {
@@ -236,7 +239,7 @@ export function useChat(config: ServerConfig): UseChatApi {
   }, [resetSession]);
 
   const stop = useCallback(() => {
-    stopStream();
+    stopStream(true, true);
   }, [stopStream]);
 
   const send = useCallback(

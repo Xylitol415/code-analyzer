@@ -1,5 +1,6 @@
 import readline from "node:readline";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import { runAsk } from "./ask.js";
 
 const EXIT_WORDS = new Set(["exit", "quit", "q", "退出"]);
 
@@ -156,7 +157,7 @@ export async function startRepl(session: AgentSession, options: ReplOptions = {}
 
       running = true;
       try {
-        await session.prompt(trimmed);
+        await runAsk(session, trimmed);
         forceNewline();
       } catch (e) {
         forceNewline();

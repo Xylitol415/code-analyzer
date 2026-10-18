@@ -12,6 +12,7 @@ export async function runAsk(
   signal?: AbortSignal,
 ): Promise<AskOutcome> {
   let answer = "";
+  let providerFailure: string | undefined;
   const toolCalls: AskOutcome["toolCalls"] = [];
   const startInfo = new Map<string, { start: number; args: unknown }>();
 
@@ -19,6 +20,12 @@ export async function runAsk(
     if (event.type === "message_update") {
       const ev = event.assistantMessageEvent;
       if (ev.type === "text_delta") answer += ev.delta;
+    } else if (event.type === "message_end" && event.message.role === "assistant") {
+      // prompt() can resolve even when the provider returned an error. A
+      // successful SDK retry replaces the earlier failure before we return.
+      providerFailure = event.message.stopReason === "error"
+        ? event.message.errorMessage || "请求失败，请检查 LLM BaseURL、API Key 和模型名"
+        : undefined;
     } else if (event.type === "tool_execution_start") {
       startInfo.set(event.toolCallId, { start: Date.now(), args: event.args });
     } else if (event.type === "tool_execution_end") {
@@ -40,6 +47,7 @@ export async function runAsk(
       // before starting the agent. abort() alone cannot cancel that preparation.
       preflightResult: () => signal?.throwIfAborted(),
     });
+    if (providerFailure) throw new Error(`模型服务请求失败：${providerFailure}`);
   } finally {
     unsub();
   }

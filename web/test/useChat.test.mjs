@@ -153,11 +153,25 @@ test("only the latest overlapping connection can become active", async (t) => {
   assert.equal(h.streams.length, 1);
 });
 
+test("stopping before the first reply marks the message stopped and aborts the request", async (t) => {
+  const h = await setup(t);
+  await h.connect();
+  await act(async () => { h.chat.stop(); });
+  assert.equal(h.streams[0].signal.aborted, true);
+  assert.equal(h.chat.streaming, false);
+  assert.equal(h.chat.messages[0].streaming, false);
+  assert.equal(h.chat.messages[0].stopped, true);
+  assert.equal(h.chat.messages[0].content, "");
+  assert.equal(h.chat.messages[0].error, undefined);
+});
+
 test("stopped stream completion and late events cannot alter a replacement stream", async (t) => {
   const h = await setup(t);
   await h.connect();
   await act(async () => {
     h.streams[0].event("text", { delta: "partial answer" });
+    h.streams[0].event("thinking", { delta: "partial thinking" });
+    h.streams[0].event("tool", { name: "read", args: { path: "index.ts" }, phase: "start" });
     await nextTick();
   });
   let question;
@@ -167,21 +181,31 @@ test("stopped stream completion and late events cannot alter a replacement strea
     await nextTick();
   });
   assert.equal(h.chat.streaming, true);
+  assert.equal(h.streams[0].signal.aborted, true);
   await act(async () => {
     h.streams[0].event("text", { delta: "stale answer" });
+    h.streams[0].event("thinking", { delta: "stale thinking" });
+    h.streams[0].event("tool", { name: "read", phase: "end", isError: false });
+    h.streams[0].event("done", { answer: "stale final answer" });
     h.streams[0].event("error", { message: "stale error" });
     h.streams[0].close();
     h.streams[1].event("text", { delta: "current answer" });
     await nextTick();
   });
+  assert.equal(h.chat.streaming, true);
+  assert.equal(h.chat.messages.at(-1).streaming, true);
   await h.finish(1, "current answer");
   await question;
   assert.equal(h.chat.messages.at(-1).content, "current answer");
   assert.equal(h.chat.messages.at(-1).error, undefined);
   assert.equal(h.chat.messages.at(-1).streaming, false);
+  assert.notEqual(h.chat.messages.at(-1).stopped, true);
   assert.equal(h.chat.messages[0].content, "partial answer");
+  assert.equal(h.chat.messages[0].thinking, "partial thinking");
+  assert.deepEqual(h.chat.messages[0].tools, [{ name: "read", args: { path: "index.ts" } }]);
   assert.equal(h.chat.messages[0].error, undefined);
   assert.equal(h.chat.messages[0].streaming, false);
+  assert.equal(h.chat.messages[0].stopped, true);
 });
 
 test("questions and cleanup use the configuration that created the session", async (t) => {

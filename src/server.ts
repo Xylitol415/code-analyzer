@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { pathToFileURL } from "node:url";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { streamSSE, type SSEStreamingApi } from "hono/streaming";
@@ -16,6 +17,7 @@ import {
 import { listModels } from "./models.js";
 import { runAsk } from "./ask.js";
 import { SessionQueue } from "./session-queue.js";
+import { LlmConfigError, parseModelOptions } from "./llm-config.js";
 
 // ---------------- 参数解析 ----------------
 interface ServerArgs {
@@ -81,183 +83,206 @@ function sseHandler(write: (e: string, d: unknown) => Promise<void>) {
 }
 
 // ---------------- App ----------------
-const args = parseArgs(process.argv.slice(2));
-const token = args.token || randomBytes(24).toString("hex");
+export function createApp(token: string) {
+  const app = new Hono();
 
-const app = new Hono();
+  app.use("*", cors());
 
-app.use("*", cors());
+  // 鉴权：除 /health 与 OPTIONS 外，均需 Bearer token
+  app.use("*", async (c, next) => {
+    if (c.req.method === "OPTIONS" || c.req.path === "/health") return next();
+    const auth = c.req.header("authorization");
+    if (auth !== `Bearer ${token}`) {
+      return c.json({ error: "unauthorized" }, 401);
+    }
+    await next();
+  });
 
-// 鉴权：除 /health 与 OPTIONS 外，均需 Bearer token
-app.use("*", async (c, next) => {
-  if (c.req.method === "OPTIONS" || c.req.path === "/health") return next();
-  const auth = c.req.header("authorization");
-  if (auth !== `Bearer ${token}`) {
-    return c.json({ error: "unauthorized" }, 401);
-  }
-  await next();
-});
+  app.get("/health", (c) => c.json({ status: "ok" }));
 
-app.get("/health", (c) => c.json({ status: "ok" }));
-
-// 列出可用模型（需鉴权）
-app.get("/models", async (c) => {
-  try {
-    return c.json(await listModels());
-  } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
-  }
-});
-
-// 建/恢复会话
-app.post("/sessions", async (c) => {
-  let body: { project?: string; sessionId?: string; resume?: boolean; modelId?: string };
-  try {
-    body = await c.req.json();
-  } catch {
-    return c.json({ error: "invalid json body" }, 400);
-  }
-  if (!body.project) return c.json({ error: "missing 'project'" }, 400);
-  try {
-    const r = await openSession({
-      project: body.project,
-      sessionId: body.sessionId,
-      resume: body.resume,
-      modelId: body.modelId,
-    });
-    return c.json(r);
-  } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
-  }
-});
-
-app.get("/sessions", (c) => c.json({ sessions: listSessions() }));
-
-// 提问（默认 SSE 流式；?stream=false 返回 JSON）
-app.post("/sessions/:id/ask", async (c) => {
-  const entry = getSession(c.req.param("id"));
-  if (!entry) return c.json({ error: "session not found" }, 404);
-
-  let body: { question?: string };
-  try {
-    body = await c.req.json();
-  } catch {
-    return c.json({ error: "invalid json body" }, 400);
-  }
-  if (!body.question) return c.json({ error: "missing 'question'" }, 400);
-
-  const wantStream = c.req.query("stream") !== "false";
-
-  if (!wantStream) {
+  // 列出可用模型（需鉴权）
+  app.get("/models", async (c) => {
     try {
-      const outcome = await runOnSession(
-        entry,
-        (signal) => runAsk(entry.session, body.question!, undefined, signal),
-        c.req.raw.signal,
-      );
-      return c.json({
-        answer: outcome.answer,
-        modelLabel: entry.modelLabel,
-        toolCalls: outcome.toolCalls,
-      });
+      return c.json(await listModels());
     } catch (e) {
       return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
     }
-  }
+  });
 
-  return streamSSE(c, async (stream) => {
-    const write = makeSseWriter(stream);
-    const controller = new AbortController();
-    stream.onAbort(() => controller.abort());
-    if (stream.aborted) controller.abort();
+  // 建/恢复会话
+  app.post("/sessions", async (c) => {
+    let body: { project?: string; sessionId?: string; resume?: boolean; modelId?: string };
+    let modelOptions: ReturnType<typeof parseModelOptions>;
     try {
-      const outcome = await runOnSession(
-        entry,
-        (signal) => runAsk(entry.session, body.question!, sseHandler(write), signal),
-        controller.signal,
-      );
-      await write("done", { modelLabel: entry.modelLabel, answer: outcome.answer });
+      body = await c.req.json();
+      modelOptions = parseModelOptions(body);
     } catch (e) {
-      await write("error", { message: e instanceof Error ? e.message : String(e) });
+      if (e instanceof LlmConfigError) return c.json({ error: e.message }, 400);
+      return c.json({ error: "invalid json body" }, 400);
+    }
+    if (typeof body.project !== "string" || !body.project.trim()) return c.json({ error: "missing 'project'" }, 400);
+    try {
+      const r = await openSession({
+        project: body.project,
+        sessionId: body.sessionId,
+        resume: body.resume,
+        ...modelOptions,
+      });
+      return c.json(r);
+    } catch (e) {
+      return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
     }
   });
-});
 
-app.delete("/sessions/:id", async (c) => {
-  const ok = await closeSession(c.req.param("id"));
-  return c.json({ ok });
-});
+  app.get("/sessions", (c) => c.json({ sessions: listSessions() }));
 
-// 一次性提问（无会话，JSON；?stream=true 可流式）
-app.post("/ask", async (c) => {
-  let body: { project?: string; question?: string; modelId?: string };
-  try {
-    body = await c.req.json();
-  } catch {
-    return c.json({ error: "invalid json body" }, 400);
-  }
-  if (!body.project || !body.question) {
-    return c.json({ error: "missing 'project' or 'question'" }, 400);
-  }
+  // 提问（默认 SSE 流式；?stream=false 返回 JSON）
+  app.post("/sessions/:id/ask", async (c) => {
+    const entry = getSession(c.req.param("id"));
+    if (!entry) return c.json({ error: "session not found" }, 404);
 
-  let resolved;
-  try {
-    resolved = resolveProject(body.project);
-  } catch (e) {
-    return c.json({ error: e instanceof Error ? e.message : String(e) }, 400);
-  }
+    let body: { question?: string };
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "invalid json body" }, 400);
+    }
+    if (!body.question) return c.json({ error: "missing 'question'" }, 400);
 
-  const wantStream = c.req.query("stream") === "true";
+    const wantStream = c.req.query("stream") !== "false";
 
-  if (wantStream) {
-    const { session, modelLabel } = await createReadOnlySession(resolved.cwd, {
-      resume: false,
-      inMemory: true,
-      modelId: body.modelId,
-    });
-    const queue = new SessionQueue(session);
+    if (!wantStream) {
+      try {
+        const outcome = await runOnSession(
+          entry,
+          (signal) => runAsk(entry.session, body.question!, undefined, signal),
+          c.req.raw.signal,
+        );
+        return c.json({
+          answer: outcome.answer,
+          modelLabel: entry.modelLabel,
+          toolCalls: outcome.toolCalls,
+        });
+      } catch (e) {
+        return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
+      }
+    }
+
     return streamSSE(c, async (stream) => {
       const write = makeSseWriter(stream);
       const controller = new AbortController();
       stream.onAbort(() => controller.abort());
       if (stream.aborted) controller.abort();
       try {
-        const outcome = await queue.run(
-          (signal) => runAsk(session, body.question!, sseHandler(write), signal),
+        const outcome = await runOnSession(
+          entry,
+          (signal) => runAsk(entry.session, body.question!, sseHandler(write), signal),
           controller.signal,
         );
-        await write("done", { modelLabel, answer: outcome.answer });
+        await write("done", { modelLabel: entry.modelLabel, answer: outcome.answer });
       } catch (e) {
         await write("error", { message: e instanceof Error ? e.message : String(e) });
-      } finally {
-        await queue.close();
       }
     });
-  }
-
-  const { session, modelLabel } = await createReadOnlySession(resolved.cwd, {
-    resume: false,
-    inMemory: true,
-    modelId: body.modelId,
   });
-  const queue = new SessionQueue(session);
-  try {
-    const outcome = await queue.run(
-      (signal) => runAsk(session, body.question!, undefined, signal),
-      c.req.raw.signal,
-    );
-    return c.json({ answer: outcome.answer, modelLabel, toolCalls: outcome.toolCalls });
-  } finally {
-    await queue.close();
-  }
-});
+
+  app.delete("/sessions/:id", async (c) => {
+    const ok = await closeSession(c.req.param("id"));
+    return c.json({ ok });
+  });
+
+  // 一次性提问（无会话，JSON；?stream=true 可流式）
+  app.post("/ask", async (c) => {
+    let body: { project?: string; question?: string; modelId?: string };
+    let modelOptions: ReturnType<typeof parseModelOptions>;
+    try {
+      body = await c.req.json();
+      modelOptions = parseModelOptions(body);
+    } catch (e) {
+      if (e instanceof LlmConfigError) return c.json({ error: e.message }, 400);
+      return c.json({ error: "invalid json body" }, 400);
+    }
+    if (typeof body.project !== "string" || !body.project.trim() || typeof body.question !== "string" || !body.question.trim()) {
+      return c.json({ error: "missing 'project' or 'question'" }, 400);
+    }
+
+    let resolved;
+    try {
+      resolved = resolveProject(body.project);
+    } catch (e) {
+      return c.json({ error: e instanceof Error ? e.message : String(e) }, 400);
+    }
+
+    const wantStream = c.req.query("stream") === "true";
+
+    let created;
+    try {
+      created = await createReadOnlySession(resolved.cwd, {
+        resume: false,
+        inMemory: true,
+        ...modelOptions,
+      });
+    } catch (e) {
+      return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
+    }
+    const { session, modelLabel } = created;
+    const queue = new SessionQueue(session);
+
+    if (wantStream) {
+      return streamSSE(c, async (stream) => {
+        const write = makeSseWriter(stream);
+        const controller = new AbortController();
+        stream.onAbort(() => controller.abort());
+        if (stream.aborted) controller.abort();
+        try {
+          const outcome = await queue.run(
+            (signal) => runAsk(session, body.question!, sseHandler(write), signal),
+            controller.signal,
+          );
+          await write("done", { modelLabel, answer: outcome.answer });
+        } catch (e) {
+          await write("error", { message: e instanceof Error ? e.message : String(e) });
+        } finally {
+          await queue.close();
+        }
+      });
+    }
+
+    try {
+      const outcome = await queue.run(
+        (signal) => runAsk(session, body.question!, undefined, signal),
+        c.req.raw.signal,
+      );
+      return c.json({ answer: outcome.answer, modelLabel, toolCalls: outcome.toolCalls });
+    } catch (e) {
+      return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
+    } finally {
+      await queue.close();
+    }
+  });
+
+  return app;
+}
 
 // ---------------- 启动 ----------------
-console.log("=".repeat(56));
-console.log("code-analyzer HTTP 服务已启动");
-console.log(`  监听: http://${args.host}:${args.port}`);
-console.log(`  Token: ${token}`);
-console.log(`  鉴权: Authorization: Bearer <token>`);
-console.log("=".repeat(56));
-
-serve({ fetch: app.fetch, port: args.port, hostname: args.host });
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const args = parseArgs(process.argv.slice(2));
+  const token = args.token || randomBytes(24).toString("hex");
+  const app = createApp(token);
+  const server = serve({ fetch: app.fetch, port: args.port, hostname: args.host }, (info) => {
+    console.log("=".repeat(56));
+    console.log("code-analyzer HTTP 服务已启动");
+    console.log(`  监听: http://${args.host}:${info.port}`);
+    console.log(`  Token: ${token}`);
+    console.log(`  鉴权: Authorization: Bearer <token>`);
+    console.log("=".repeat(56));
+  });
+  server.once("error", (error: NodeJS.ErrnoException) => {
+    if (error.code === "EADDRINUSE") {
+      console.error(`启动失败：${args.host}:${args.port} 已被占用。请使用现有服务，或通过 --port 指定其他端口。`);
+    } else {
+      console.error(`HTTP 服务错误：${error.message}`);
+    }
+    process.exitCode = 1;
+  });
+}

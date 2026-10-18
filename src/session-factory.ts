@@ -8,6 +8,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { createGitReadonlyTool } from "./git-tool.js";
 import { getEnvConfig } from "./config.js";
+import { parseModelOptions, type SessionModelOptions } from "./llm-config.js";
 
 /** 追加到默认系统提示词末尾的「代码逻辑分析」角色说明。 */
 const ANALYZER_INSTRUCTIONS = `## 角色：只读代码逻辑分析助手
@@ -29,11 +30,9 @@ const ANALYZER_INSTRUCTIONS = `## 角色：只读代码逻辑分析助手
 - 严格只读：本会话只提供 read / grep / find / ls 与只读 git，没有写文件或执行任意命令的能力。
 - 回答简洁、结构化；默认使用中文（除非用户要求其他语言）。`;
 
-export interface ReadOnlySessionOptions {
+export interface ReadOnlySessionOptions extends SessionModelOptions {
   /** 是否恢复该项目上一次的会话（默认新建）。 */
   resume: boolean;
-  /** 覆盖默认模型，格式 "provider/modelId"，例如 "deepseek/deepseek-v4-pro"。 */
-  modelId?: string;
   /** 使用内存会话（不落盘），用于一次性提问。默认 false。 */
   inMemory?: boolean;
 }
@@ -54,26 +53,50 @@ export async function createReadOnlySession(
   projectPath: string,
   options: ReadOnlySessionOptions,
 ): Promise<ReadOnlySessionResult> {
+  const selection = parseModelOptions(options);
   const agentDir = getAgentDir();
   const env = getEnvConfig();
 
-  const modelRuntime = await ModelRuntime.create();
-
-  // 确定 provider：优先从显式模型 / 环境变量模型里取，默认 deepseek
-  const provider = providerOf(options.modelId ?? env.model) ?? "deepseek";
-
-  // base URL 覆盖：环境变量 / .env 优先（registerProvider 会把 baseUrl 覆盖到该 provider 下所有模型）
-  if (env.baseUrl) {
-    modelRuntime.registerProvider(provider, { baseUrl: env.baseUrl });
+  // A custom endpoint does not inherit provider overrides from models.json.
+  // Each session owns its runtime and its non-persistent credential overlay.
+  const modelRuntime = await ModelRuntime.create(selection.llm ? { modelsPath: null, refreshOnCreate: false } : undefined);
+  let model;
+  if (selection.llm) {
+    const { baseUrl, model: id, apiKey } = selection.llm;
+    const provider = "custom-openai";
+    modelRuntime.registerProvider(provider, {
+      baseUrl,
+      api: "openai-completions",
+      models: [{
+        id,
+        name: id,
+        reasoning: false,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 32768,
+        maxTokens: 4096,
+        compat: {
+          supportsStore: false,
+          supportsDeveloperRole: false,
+          supportsReasoningEffort: false,
+          supportsUsageInStreaming: false,
+          supportsStrictMode: false,
+          maxTokensField: "max_tokens",
+        },
+      }],
+    });
+    // Runtime keys are literal: registerProvider.apiKey would interpret $/!
+    // as environment interpolation / commands. The SDK requires a nonempty
+    // key even for local services that do not authenticate requests.
+    await modelRuntime.setRuntimeApiKey(provider, apiKey || "not-required");
+    model = modelRuntime.getModel(provider, id)!;
+  } else {
+    // 保留已配置 provider 的环境变量覆盖规则。
+    const provider = providerOf(selection.modelId ?? env.model) ?? "deepseek";
+    if (env.baseUrl) modelRuntime.registerProvider(provider, { baseUrl: env.baseUrl });
+    if (env.apiKey) await modelRuntime.setRuntimeApiKey(provider, env.apiKey);
+    model = await resolveModel(modelRuntime, selection.modelId ?? env.model);
   }
-
-  // API key 注入：环境变量 / .env 优先于 ~/.pi/agent 里的凭据
-  if (env.apiKey) {
-    await modelRuntime.setRuntimeApiKey(provider, env.apiKey);
-  }
-
-  // 模型选择：显式 --model / HTTP modelId 优先，其次环境变量 CODE_ANALYZER_MODEL
-  const model = await resolveModel(modelRuntime, options.modelId ?? env.model);
 
   const resourceLoader = new DefaultResourceLoader({
     cwd: projectPath,
@@ -97,6 +120,19 @@ export async function createReadOnlySession(
     resourceLoader,
     sessionManager,
   });
+
+  const sessionKey = selection.llm ? selection.llm.apiKey : env.apiKey;
+  if (sessionKey) {
+    // pi 0.87.1 notifies public listeners before persisting message_end.
+    // Register before HTTP/REPL listeners so a provider's echoed key cannot
+    // enter either the returned error or the saved conversation. dispose()
+    // removes this listener along with the other session subscriptions.
+    session.subscribe((event) => {
+      if (event.type === "message_end" && event.message.role === "assistant" && event.message.errorMessage) {
+        event.message.errorMessage = event.message.errorMessage.replaceAll(sessionKey, "[REDACTED]");
+      }
+    });
+  }
 
   return { session, modelLabel: `${model.provider}/${model.id}` };
 }

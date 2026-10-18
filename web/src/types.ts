@@ -15,4 +15,6 @@ export interface ChatMessage {
   tools: ToolCall[];
   error?: string;
   streaming: boolean;
+  /** 用户主动停止；已接收的正文、思考和工具记录仍保留。 */
+  stopped?: boolean;
 }
