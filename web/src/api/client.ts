@@ -51,6 +51,19 @@ export async function createSession(
   return res.json();
 }
 
+export async function deleteSession(config: ServerConfig, sessionId: string): Promise<void> {
+  const res = await fetch(`${config.baseUrl}/sessions/${encodeURIComponent(sessionId)}`, {
+    method: "DELETE",
+    headers: authHeaders(config),
+    keepalive: true,
+  });
+  // Releasing a session is idempotent, including after a server restart.
+  if (!res.ok && res.status !== 404) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? `HTTP ${res.status}`);
+  }
+}
+
 export async function listModels(config: ServerConfig): Promise<ModelList> {
   const res = await fetch(`${config.baseUrl}/models`, {
     headers: authHeaders(config),

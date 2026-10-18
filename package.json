@@ -8,6 +8,7 @@
     "node": ">=20"
   },
   "scripts": {
+    "test": "node --import tsx --test tests/*.test.ts",
     "start": "tsx src/main.ts",
     "serve": "tsx src/server.ts",
     "typecheck": "tsc --noEmit"

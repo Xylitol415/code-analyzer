@@ -191,7 +191,9 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/jso
 | `done` | `{"modelLabel":"...","answer":"完整回答"}` |
 | `error` | `{"message":"..."}` |
 
-> 同一会话的请求会**串行排队**（pi 的单会话模型同一时刻只允许一个 prompt）；不同会话之间并行。客户端断开 SSE 连接会触发当前回答中止。
+> 同一会话的请求会**串行排队**（pi 的单会话模型同一时刻只允许一个 prompt）；不同会话之间并行。客户端断开 SSE 连接时，仅取消该连接对应的请求：排队中的请求会被跳过，正在执行的请求会被中止，其他请求不受影响。
+
+`DELETE /sessions/:id` 会立即移除活动会话、拒绝新任务并跳过尚未执行的任务，等待当前任务及其中止操作结束后再释放资源。删除操作只释放运行中的会话，不删除磁盘上的历史记录。Web 在新建、重新连接或组件卸载时调用此接口；网络断开或浏览器崩溃时仍可能无法送达清理请求。
 
 ## Web 前端
 
@@ -262,12 +264,14 @@ session-factory（只读会话 + 模型/凭据 + 系统提示词）
 ```bash
 # 后端（项目根目录）
 npm install          # 安装依赖
+npm test             # 会话取消、关闭与模型请求准备阶段的回归测试
 npm run typecheck    # 类型检查
 npm start -- <path>  # 交互式 REPL
 npm run serve --     # HTTP 服务
 
 # 前端（web/ 目录）
 cd web && npm install
+npm test             # 前端会话清理与流式请求竞态回归测试
 npm run dev          # 开发服务器 http://127.0.0.1:5173
 npm run build        # 生产构建（产物在 web/dist）
 ```

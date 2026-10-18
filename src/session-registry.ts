@@ -2,30 +2,18 @@ import { randomUUID } from "node:crypto";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { createReadOnlySession } from "./session-factory.js";
 import { resolveProject } from "./project-resolver.js";
+import { SessionQueue } from "./session-queue.js";
 
 export interface SessionEntry {
   id: string;
   projectPath: string;
   modelLabel: string;
   session: AgentSession;
-  /** 串行队列尾：同一会话同一时刻只允许一个 prompt 运行。 */
-  queue: Promise<unknown>;
+  /** 串行执行、取消和关闭状态。 */
+  queue: SessionQueue;
 }
 
 const registry = new Map<string, SessionEntry>();
-
-/**
- * 把任务串行挂到会话队列上：前一个任务（无论成败）结束后再执行下一个。
- * 返回的 Promise 反映本次任务的成败，但队列尾始终吞掉异常以保持链存活。
- */
-function enqueue<T>(entry: SessionEntry, task: () => Promise<T>): Promise<T> {
-  const run = entry.queue.then(task, task);
-  entry.queue = run.then(
-    () => undefined,
-    () => undefined,
-  );
-  return run;
-}
 
 export interface OpenSessionOptions {
   project: string;
@@ -64,7 +52,7 @@ export async function openSession(opts: OpenSessionOptions): Promise<OpenSession
   // resume 且恢复到了含历史用户消息的会话，才算真正的「恢复」
   const resumed = (opts.resume ?? false) && session.messages.some((m) => m.role === "user");
 
-  registry.set(id, { id, projectPath: resolved.cwd, modelLabel, session, queue: Promise.resolve() });
+  registry.set(id, { id, projectPath: resolved.cwd, modelLabel, session, queue: new SessionQueue(session) });
   return { id, projectPath: resolved.cwd, modelLabel, resumed };
 }
 
@@ -72,15 +60,16 @@ export function getSession(id: string): SessionEntry | undefined {
   return registry.get(id);
 }
 
-export function runOnSession<T>(entry: SessionEntry, task: () => Promise<T>): Promise<T> {
-  return enqueue(entry, task);
+export function runOnSession<T>(entry: SessionEntry, task: (signal: AbortSignal) => Promise<T>, signal?: AbortSignal): Promise<T> {
+  return entry.queue.run(task, signal);
 }
 
-export function closeSession(id: string): boolean {
+export async function closeSession(id: string): Promise<boolean> {
   const entry = registry.get(id);
   if (!entry) return false;
-  entry.session.dispose();
+  // Remove immediately so new requests cannot join a session being closed.
   registry.delete(id);
+  await entry.queue.close();
   return true;
 }
 

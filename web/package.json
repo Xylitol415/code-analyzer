@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test test/*.test.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -23,7 +24,9 @@
     "@types/react-dom": "^19.3.0",
     "@types/react-syntax-highlighter": "^15.5.13",
     "@vitejs/plugin-react": "^6.1.1",
+    "react-test-renderer": "19.3.1",
     "tailwindcss": "^4.3.3",
+    "tsx": "^4.23.15",
     "typescript": "^5.9.3",
     "vite": "^8.3.0"
   }

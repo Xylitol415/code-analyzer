@@ -3,7 +3,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { streamSSE, type SSEStreamingApi } from "hono/streaming";
 import { serve } from "@hono/node-server";
-import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
+import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { createReadOnlySession } from "./session-factory.js";
 import { resolveProject } from "./project-resolver.js";
 import {
@@ -12,9 +12,10 @@ import {
   listSessions,
   openSession,
   runOnSession,
-  type SessionEntry,
 } from "./session-registry.js";
 import { listModels } from "./models.js";
+import { runAsk } from "./ask.js";
+import { SessionQueue } from "./session-queue.js";
 
 // ---------------- 参数解析 ----------------
 interface ServerArgs {
@@ -49,47 +50,6 @@ code-analyzer HTTP 服务
   return out;
 }
 
-// ---------------- 提问执行 ----------------
-interface AskOutcome {
-  answer: string;
-  toolCalls: Array<{ name: string; args: unknown; isError: boolean; ms: number }>;
-}
-
-async function runAsk(
-  session: AgentSession,
-  question: string,
-  onEvent?: (e: AgentSessionEvent) => void,
-): Promise<AskOutcome> {
-  let answer = "";
-  const toolCalls: AskOutcome["toolCalls"] = [];
-  const startInfo = new Map<string, { start: number; args: unknown }>();
-
-  const unsub = session.subscribe((event) => {
-    if (event.type === "message_update") {
-      const ev = event.assistantMessageEvent;
-      if (ev.type === "text_delta") answer += ev.delta;
-    } else if (event.type === "tool_execution_start") {
-      startInfo.set(event.toolCallId, { start: Date.now(), args: event.args });
-    } else if (event.type === "tool_execution_end") {
-      const info = startInfo.get(event.toolCallId);
-      toolCalls.push({
-        name: event.toolName,
-        args: info?.args,
-        isError: event.isError,
-        ms: info ? Date.now() - info.start : 0,
-      });
-    }
-    onEvent?.(event);
-  });
-
-  try {
-    await session.prompt(question);
-  } finally {
-    unsub();
-  }
-  return { answer, toolCalls };
-}
-
 // ---------------- SSE 写入器（保序 + 容错） ----------------
 function makeSseWriter(stream: SSEStreamingApi) {
   let chain: Promise<void> = Promise.resolve();
@@ -102,7 +62,7 @@ function makeSseWriter(stream: SSEStreamingApi) {
   return write;
 }
 
-function sseHandler(entry: SessionEntry, question: string, write: (e: string, d: unknown) => Promise<void>) {
+function sseHandler(write: (e: string, d: unknown) => Promise<void>) {
   return (e: AgentSessionEvent) => {
     if (e.type === "message_update") {
       const ev = e.assistantMessageEvent;
@@ -190,7 +150,11 @@ app.post("/sessions/:id/ask", async (c) => {
 
   if (!wantStream) {
     try {
-      const outcome = await runOnSession(entry, () => runAsk(entry.session, body.question!));
+      const outcome = await runOnSession(
+        entry,
+        (signal) => runAsk(entry.session, body.question!, undefined, signal),
+        c.req.raw.signal,
+      );
       return c.json({
         answer: outcome.answer,
         modelLabel: entry.modelLabel,
@@ -203,12 +167,14 @@ app.post("/sessions/:id/ask", async (c) => {
 
   return streamSSE(c, async (stream) => {
     const write = makeSseWriter(stream);
-    stream.onAbort(() => {
-      entry.session.abort().catch(() => {});
-    });
+    const controller = new AbortController();
+    stream.onAbort(() => controller.abort());
+    if (stream.aborted) controller.abort();
     try {
-      const outcome = await runOnSession(entry, () =>
-        runAsk(entry.session, body.question!, sseHandler(entry, body.question!, write)),
+      const outcome = await runOnSession(
+        entry,
+        (signal) => runAsk(entry.session, body.question!, sseHandler(write), signal),
+        controller.signal,
       );
       await write("done", { modelLabel: entry.modelLabel, answer: outcome.answer });
     } catch (e) {
@@ -217,8 +183,8 @@ app.post("/sessions/:id/ask", async (c) => {
   });
 });
 
-app.delete("/sessions/:id", (c) => {
-  const ok = closeSession(c.req.param("id"));
+app.delete("/sessions/:id", async (c) => {
+  const ok = await closeSession(c.req.param("id"));
   return c.json({ ok });
 });
 
@@ -249,20 +215,22 @@ app.post("/ask", async (c) => {
       inMemory: true,
       modelId: body.modelId,
     });
+    const queue = new SessionQueue(session);
     return streamSSE(c, async (stream) => {
       const write = makeSseWriter(stream);
-      stream.onAbort(() => session.abort().catch(() => {}));
+      const controller = new AbortController();
+      stream.onAbort(() => controller.abort());
+      if (stream.aborted) controller.abort();
       try {
-        const outcome = await runAsk(session, body.question!, sseHandler(
-          { session, modelLabel, projectPath: resolved.cwd, id: "one-shot", queue: Promise.resolve() },
-          body.question!,
-          write,
-        ));
+        const outcome = await queue.run(
+          (signal) => runAsk(session, body.question!, sseHandler(write), signal),
+          controller.signal,
+        );
         await write("done", { modelLabel, answer: outcome.answer });
       } catch (e) {
         await write("error", { message: e instanceof Error ? e.message : String(e) });
       } finally {
-        session.dispose();
+        await queue.close();
       }
     });
   }
@@ -272,11 +240,15 @@ app.post("/ask", async (c) => {
     inMemory: true,
     modelId: body.modelId,
   });
+  const queue = new SessionQueue(session);
   try {
-    const outcome = await runAsk(session, body.question!);
+    const outcome = await queue.run(
+      (signal) => runAsk(session, body.question!, undefined, signal),
+      c.req.raw.signal,
+    );
     return c.json({ answer: outcome.answer, modelLabel, toolCalls: outcome.toolCalls });
   } finally {
-    session.dispose();
+    await queue.close();
   }
 });
 
