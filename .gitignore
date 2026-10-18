@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.log
+
+# 环境变量（含 API key），禁止上传
+.env
+.env.*
+!.env.example
