@@ -2,12 +2,17 @@ import { useCallback, useMemo, useRef, useState } from "react";
 import type { ChatMessage, SseEventName, ToolCall } from "../types";
 import { askStream, createSession, type ServerConfig } from "../api/client";
 
+const GREETING_PROMPT =
+  "会话已建立。请用简短友好的中文向用户打个招呼，介绍你是只读的代码逻辑分析助手，能帮他分析项目整体架构、追踪调用链、解释某段代码逻辑、查看代码演进历史等，并邀请他开始提问。不要冗长。";
+const SUMMARY_PROMPT =
+  "欢迎回来。请用简短的中文总结我们之前讨论过的内容和主要结论，方便用户快速回顾，然后邀请他继续提问。";
+
 export interface UseChatApi {
   messages: ChatMessage[];
   sessionId: string | null;
   modelLabel: string | null;
   streaming: boolean;
-  connect: (project: string) => Promise<void>;
+  connect: (project: string, resume: boolean) => Promise<void>;
   send: (question: string) => Promise<void>;
   stop: () => void;
   newSession: () => void;
@@ -30,6 +35,7 @@ export function useChat(config: ServerConfig): UseChatApi {
   const activeIdRef = useRef<string | null>(null);
   const bufferRef = useRef<Buffer>({ text: "", thinking: "", tools: [] });
   const flushTimerRef = useRef<number | null>(null);
+  const sessionIdRef = useRef<string | null>(null);
 
   const flushBuffer = useCallback((finalize: boolean) => {
     const id = activeIdRef.current;
@@ -59,42 +65,12 @@ export function useChat(config: ServerConfig): UseChatApi {
     }, 60);
   }, [flushBuffer]);
 
-  const connect = useCallback(
-    async (project: string) => {
-      const s = await createSession(config, project);
-      setSessionId(s.id);
-      setModelLabel(s.modelLabel);
-      setMessages([]);
-    },
-    [config],
-  );
-
-  const newSession = useCallback(() => {
-    abortRef.current?.abort();
-    setSessionId(null);
-    setModelLabel(null);
-    setMessages([]);
-    setStreaming(false);
-  }, []);
-
-  const stop = useCallback(() => {
-    abortRef.current?.abort();
-  }, []);
-
-  const send = useCallback(
-    async (question: string) => {
-      if (!sessionId || streaming) return;
+  /** 发起一次流式提问；showUser=false 表示开场（不显示为用户气泡）。 */
+  const runAsk = useCallback(
+    async (sid: string, question: string, opts: { showUser: boolean }) => {
       const trimmed = question.trim();
       if (!trimmed) return;
 
-      const userMsg: ChatMessage = {
-        id: crypto.randomUUID(),
-        role: "user",
-        content: trimmed,
-        thinking: "",
-        tools: [],
-        streaming: false,
-      };
       const asstId = crypto.randomUUID();
       const asstMsg: ChatMessage = {
         id: asstId,
@@ -107,7 +83,20 @@ export function useChat(config: ServerConfig): UseChatApi {
 
       activeIdRef.current = asstId;
       bufferRef.current = { text: "", thinking: "", tools: [] };
-      setMessages((prev) => [...prev, userMsg, asstMsg]);
+
+      if (opts.showUser) {
+        const userMsg: ChatMessage = {
+          id: crypto.randomUUID(),
+          role: "user",
+          content: trimmed,
+          thinking: "",
+          tools: [],
+          streaming: false,
+        };
+        setMessages((prev) => [...prev, userMsg, asstMsg]);
+      } else {
+        setMessages((prev) => [...prev, asstMsg]);
+      }
       setStreaming(true);
 
       const ctrl = new AbortController();
@@ -159,12 +148,10 @@ export function useChat(config: ServerConfig): UseChatApi {
       };
 
       try {
-        await askStream(config, sessionId, trimmed, ctrl.signal, handleEvent);
+        await askStream(config, sid, trimmed, ctrl.signal, handleEvent);
       } catch (e) {
         const err = e as Error;
-        if (err.name !== "AbortError") {
-          bufferRef.current.error = err.message;
-        }
+        if (err.name !== "AbortError") bufferRef.current.error = err.message;
       } finally {
         if (flushTimerRef.current !== null) {
           window.clearTimeout(flushTimerRef.current);
@@ -175,7 +162,42 @@ export function useChat(config: ServerConfig): UseChatApi {
         activeIdRef.current = null;
       }
     },
-    [config, sessionId, streaming, flushBuffer, scheduleFlush],
+    [config, flushBuffer, scheduleFlush],
+  );
+
+  const connect = useCallback(
+    async (project: string, resume: boolean) => {
+      const s = await createSession(config, project, resume);
+      sessionIdRef.current = s.id;
+      setSessionId(s.id);
+      setModelLabel(s.modelLabel);
+      setMessages([]);
+      // 自动触发开场（不阻塞 connect 返回）：恢复→总结，新建→打招呼
+      void runAsk(s.id, s.resumed ? SUMMARY_PROMPT : GREETING_PROMPT, { showUser: false });
+    },
+    [config, runAsk],
+  );
+
+  const newSession = useCallback(() => {
+    abortRef.current?.abort();
+    sessionIdRef.current = null;
+    setSessionId(null);
+    setModelLabel(null);
+    setMessages([]);
+    setStreaming(false);
+  }, []);
+
+  const stop = useCallback(() => {
+    abortRef.current?.abort();
+  }, []);
+
+  const send = useCallback(
+    (question: string) => {
+      const sid = sessionIdRef.current;
+      if (!sid) return Promise.resolve();
+      return runAsk(sid, question, { showUser: true });
+    },
+    [runAsk],
   );
 
   return useMemo(

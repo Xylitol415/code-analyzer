@@ -40,6 +40,8 @@ export interface OpenSessionResult {
   id: string;
   projectPath: string;
   modelLabel: string;
+  /** 是否恢复到了已有历史会话（用于前端决定「打招呼」还是「总结」）。 */
+  resumed: boolean;
 }
 
 export async function openSession(opts: OpenSessionOptions): Promise<OpenSessionResult> {
@@ -49,7 +51,7 @@ export async function openSession(opts: OpenSessionOptions): Promise<OpenSession
   if (opts.sessionId) {
     const existing = registry.get(opts.sessionId);
     if (existing) {
-      return { id: existing.id, projectPath: existing.projectPath, modelLabel: existing.modelLabel };
+      return { id: existing.id, projectPath: existing.projectPath, modelLabel: existing.modelLabel, resumed: false };
     }
   }
 
@@ -59,8 +61,11 @@ export async function openSession(opts: OpenSessionOptions): Promise<OpenSession
     modelId: opts.modelId,
   });
 
+  // resume 且恢复到了含历史用户消息的会话，才算真正的「恢复」
+  const resumed = (opts.resume ?? false) && session.messages.some((m) => m.role === "user");
+
   registry.set(id, { id, projectPath: resolved.cwd, modelLabel, session, queue: Promise.resolve() });
-  return { id, projectPath: resolved.cwd, modelLabel };
+  return { id, projectPath: resolved.cwd, modelLabel, resumed };
 }
 
 export function getSession(id: string): SessionEntry | undefined {

@@ -10,6 +10,14 @@ body,
   margin: 0;
 }
 
+/* <details> 折叠箭头去掉默认标记 */
+details > summary {
+  list-style: none;
+}
+details > summary::-webkit-details-marker {
+  display: none;
+}
+
 /* Markdown 正文排版（配合 react-markdown） */
 .markdown-body {
   color: #1f2937;

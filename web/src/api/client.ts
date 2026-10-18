@@ -10,6 +10,7 @@ export interface SessionInfo {
   id: string;
   projectPath: string;
   modelLabel: string;
+  resumed: boolean;
 }
 
 function authHeaders(config: ServerConfig): Record<string, string> {
@@ -22,11 +23,12 @@ function authHeaders(config: ServerConfig): Record<string, string> {
 export async function createSession(
   config: ServerConfig,
   project: string,
+  resume = false,
 ): Promise<SessionInfo> {
   const res = await fetch(`${config.baseUrl}/sessions`, {
     method: "POST",
     headers: authHeaders(config),
-    body: JSON.stringify({ project }),
+    body: JSON.stringify({ project, resume }),
   });
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { error?: string };
