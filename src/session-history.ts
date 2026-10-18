@@ -10,6 +10,8 @@ export interface HistorySessionInfo {
   messageCount: number;
   modelLabel?: string;
   active?: boolean;
+  /** Exact runtime connection; absent while a session is opening or closing. */
+  activeSessionId?: string;
 }
 
 export interface HistoryMessage {

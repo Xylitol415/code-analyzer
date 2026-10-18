@@ -130,6 +130,30 @@ test("concurrent opens of one history are rejected until its live session is rel
   assert.equal((await post({ historyId: manager.getSessionId() })).response.status, 200);
 });
 
+test("history identifies the exact live session so an orphan can be released without deleting history or another session", async (t) => {
+  const { project, post, list, app } = await setup(t);
+  const first = history(project, "Orphaned browser history");
+  const second = history(project, "Another browser");
+  const orphan = (await post({ historyId: first.getSessionId() })).result;
+  const other = (await post({ historyId: second.getSessionId() })).result;
+  const entries = (await (await list()).json()).sessions;
+  const occupied = entries.find((entry) => entry.id === first.getSessionId());
+  assert.equal(occupied.activeSessionId, orphan.id);
+  const before = await readFile(first.getSessionFile()!, "utf8");
+  assert.equal((await app.request(`/sessions/${occupied.activeSessionId}`, { method: "DELETE" })).status, 401);
+  const headers = { authorization: `Bearer ${token}` };
+  assert.equal((await app.request(`/sessions/${occupied.activeSessionId}`, { method: "DELETE", headers })).status, 200);
+  assert.equal(await readFile(first.getSessionFile()!, "utf8"), before);
+  assert.ok(getSession(other.id));
+  const released = (await (await list()).json()).sessions.find((entry) => entry.id === first.getSessionId());
+  assert.equal(released.active, false);
+  assert.equal(released.activeSessionId, undefined);
+  const restored = await post({ historyId: first.getSessionId() });
+  assert.equal(restored.response.status, 200);
+  await app.request(`/sessions/${occupied.activeSessionId}`, { method: "DELETE", headers });
+  assert.ok(getSession(restored.result.id), "a stale release must not terminate a replacement connection");
+});
+
 test("new sessions return no history and legacy resume opens the latest persisted conversation", async (t) => {
   const { project, post } = await setup(t);
   history(project, "Older", 1000);

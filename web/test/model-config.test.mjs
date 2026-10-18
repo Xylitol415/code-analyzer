@@ -19,20 +19,23 @@ function visibleText(node) {
   return node?.children?.map(visibleText).join("") ?? "";
 }
 
-async function setup(t, { openConfig = true } = {}) {
+async function setup(t, { openConfig = true, autoRelease = true } = {}) {
   const requests = [];
   const timers = new Map();
   let nextTimer = 0;
   t.mock.method(globalThis, "fetch", (url, options = {}) => new Promise((resolve) => {
     requests.push({ url, ...options, reply: (body, status = 200) => resolve(Response.json(body, { status })) });
-    if (options.method === "DELETE") resolve(Response.json({ ok: true }));
+    if (options.method === "DELETE" && autoRelease) resolve(Response.json({ ok: true }));
     if (url.endsWith("/ask")) resolve(new Response("", { headers: { "content-type": "text/event-stream" } }));
   }));
   const oldWindow = globalThis.window;
   const oldDocument = globalThis.document;
   const oldActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT;
+  const lifecycle = new EventTarget();
   globalThis.window = {
     fetch: globalThis.fetch,
+    addEventListener: lifecycle.addEventListener.bind(lifecycle),
+    removeEventListener: lifecycle.removeEventListener.bind(lifecycle),
     setTimeout(callback) { const id = ++nextTimer; timers.set(id, callback); return id; },
     clearTimeout(id) { timers.delete(id); },
   };
@@ -62,6 +65,13 @@ async function setup(t, { openConfig = true } = {}) {
     get configButton() { return findButton("会话配置"); },
     get dialogs() { return root.root.findAllByProps({ role: "dialog", "aria-label": "会话配置" }); },
     get historyOptions() { return root.root.findAllByProps({ name: "history-session" }); },
+    async clickButton(label) {
+      const button = findButton(label);
+      assert.ok(button, `Expected a ${label} button`);
+      await act(async () => { void button.props.onClick(); });
+    },
+    async openSkills() { await act(async () => { root.root.findByProps({ "aria-label": "Skills 管理" }).props.onClick(); }); },
+    async closeSkills() { await act(async () => { root.root.findByProps({ "aria-label": "关闭 Skills" }).props.onClick(); }); },
     async openHistory() { await act(async () => { root.root.findByProps({ "aria-label": "历史会话" }).props.onClick(); }); },
     async sessionMode(value) { await act(async () => { root.root.findByProps({ name: "session-mode", value }).props.onChange(); }); },
     async selectHistory(id) { await act(async () => { root.root.findByProps({ name: "history-session", value: id }).props.onChange(); }); },
@@ -326,7 +336,7 @@ const histories = {
   projectPath: "/connected-project",
   sessions: [
     { id: "history-older", title: "分析 Raft 选举流程", createdAt: "2026-10-17T10:00:00.000Z", updatedAt: "2026-10-18T10:00:00.000Z", messageCount: 8, modelLabel: "openai/gpt-example" },
-    { id: "history-active", title: "正在使用的会话", createdAt: "2026-10-18T11:00:00.000Z", updatedAt: "2026-10-18T11:00:00.000Z", messageCount: 2, active: true },
+    { id: "history-active", title: "正在使用的会话", createdAt: "2026-10-18T11:00:00.000Z", updatedAt: "2026-10-18T11:00:00.000Z", messageCount: 2, active: true, activeSessionId: "orphan-runtime" },
   ],
 };
 
@@ -442,4 +452,77 @@ test("reopening configuration refreshes historical session ownership while keepi
   await h.reply(historyRequest(h), { ...histories, sessions: histories.sessions.map((session) => ({ ...session, active: true })) });
   assert.equal(h.historyOptions.every((option) => option.props.disabled), true);
   assert.equal(h.connect.props.disabled, true);
+});
+
+test("an occupied history can be explicitly released, then selected again without losing its record", async (t) => {
+  const h = await setup(t, { autoRelease: false });
+  await configureCustomSession(h);
+  await h.sessionMode("history");
+  await h.flushTimers();
+  await h.reply(historyRequest(h), histories);
+  await h.clickButton("退出会话");
+  assert.match(h.visibleText, /中止.*回复/);
+  assert.match(h.visibleText, /保留历史/);
+  assert.equal(h.requests.filter((r) => r.method === "DELETE").length, 0);
+  await h.clickButton("取消");
+  assert.equal(h.requests.filter((r) => r.method === "DELETE").length, 0);
+  await h.clickButton("退出会话");
+  await h.clickButton("确认退出");
+  const index = h.requests.findLastIndex((r) => r.method === "DELETE");
+  assert.equal(h.requests[index].url, "http://127.0.0.1:8787/sessions/orphan-runtime");
+  assert.equal(h.requests[index].headers.Authorization, "Bearer backend-token");
+  assert.equal(h.connect.props.disabled, true);
+  await h.reply(index, { ok: true });
+  await h.flushTimers();
+  await h.reply(historyRequest(h), { ...histories, sessions: histories.sessions.map((s) => ({ ...s, active: false, activeSessionId: undefined })) });
+  assert.equal(h.historyOptions.find((o) => o.props.value === "history-active").props.disabled, false);
+  await h.selectHistory("history-active");
+  assert.equal(h.connect.props.disabled, false);
+  assert.match(h.visibleText, /正在使用的会话/);
+});
+
+test("failed history release keeps its confirmation and occupancy visible and allows retry", async (t) => {
+  const h = await setup(t, { autoRelease: false });
+  await configureCustomSession(h);
+  await h.sessionMode("history");
+  await h.flushTimers();
+  await h.reply(historyRequest(h), histories);
+  await h.clickButton("退出会话");
+  await h.clickButton("确认退出");
+  await h.reply(h.requests.findLastIndex((r) => r.method === "DELETE"), { error: "unauthorized" }, 401);
+  assert.match(h.visibleText, /401.*Token/);
+  assert.equal(h.historyOptions.find((o) => o.props.value === "history-active").props.disabled, true);
+  await h.clickButton("确认退出");
+  assert.equal(h.requests.filter((r) => r.method === "DELETE").length, 2);
+  await h.reply(h.requests.findLastIndex((r) => r.method === "DELETE"), { ok: true });
+});
+
+
+test("Skills management binds to actual session project and original backend even while configuration drafts change", async (t) => {
+  const h = await setup(t);
+  await configureCustomSession(h, "https://git.test/team/project.git");
+  await h.clickConnect();
+  const creation = h.requests.findLastIndex((request) => request.url.endsWith("/sessions"));
+  await h.reply(creation, { id: "bound-session", projectPath: "/canonical/cloned-project", modelLabel: "actual", resumed: true, skillsRevision: 7, skills: [] });
+  await h.openConfig();
+  await h.input("后端地址", "http://draft-backend.test");
+  await h.input("Token", "draft-token");
+  await h.input("项目路径 或 git URL", "/draft-project");
+  await h.closeConfig();
+  await h.openSkills();
+  const first = h.requests.findLastIndex((request) => request.url.includes("/skills?"));
+  assert.equal(h.requests[first].url, "http://127.0.0.1:8787/skills?project=%2Fcanonical%2Fcloned-project");
+  assert.equal(h.requests[first].headers.Authorization, "Bearer backend-token");
+  await h.reply(first, { projectPath: "/canonical/cloned-project", revision: 7, installed: [], local: [] });
+  assert.match(h.visibleText, /当前会话项目：\/canonical\/cloned-project/);
+  assert.match(h.visibleText, /当前会话已应用 0 个技能 · 修订 7/);
+  await h.closeSkills();
+  await h.newSession();
+  await h.closeConfig();
+  await h.openSkills();
+  const second = h.requests.findLastIndex((request) => request.url.includes("/skills?"));
+  assert.equal(h.requests[second].url, "http://draft-backend.test/skills?project=%2Fdraft-project");
+  assert.equal(h.requests[second].headers.Authorization, "Bearer draft-token");
+  await h.reply(second, { projectPath: "/draft-project", revision: 0, installed: [], local: [] });
+  assert.match(h.visibleText, /待连接项目：\/draft-project/);
 });

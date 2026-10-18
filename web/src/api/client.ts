@@ -1,5 +1,5 @@
 import { fetchEventSource } from "@microsoft/fetch-event-source";
-import type { ChatMessage, SseEventName } from "../types";
+import type { ChatMessage, SseEventName, SkillLibrary, SkillPreview, SkillSnapshot, SkillConfirmation } from "../types";
 
 export interface ServerConfig {
   baseUrl: string;
@@ -13,6 +13,8 @@ export interface SessionInfo {
   resumed: boolean;
   historyId?: string;
   messages?: ChatMessage[];
+  skills?: SkillSnapshot["skills"];
+  skillsRevision?: number;
 }
 
 export interface HistorySessionInfo {
@@ -23,6 +25,7 @@ export interface HistorySessionInfo {
   messageCount: number;
   modelLabel?: string;
   active?: boolean;
+  activeSessionId?: string;
 }
 
 export interface HistoryList {
@@ -148,4 +151,51 @@ export function askStream(
       throw err;
     },
   });
+}
+
+
+export async function listSkills(config: ServerConfig, project: string): Promise<SkillLibrary> {
+  const response = await fetch(`${config.baseUrl}/skills?project=${encodeURIComponent(project)}`, {
+    headers: authHeaders(config),
+  });
+  if (!response.ok) throw await responseError(response);
+  return response.json();
+}
+
+export async function prepareSkillImport(
+  config: ServerConfig, project: string, input: { file: File } | { url: string } | { localId: string },
+): Promise<SkillPreview> {
+  let body: FormData | string;
+  let headers: Record<string, string>;
+  if ("file" in input) {
+    body = new FormData();
+    body.set("project", project);
+    body.set("file", input.file);
+    // The browser supplies the multipart boundary.
+    headers = { Authorization: `Bearer ${config.token}` };
+  } else {
+    body = JSON.stringify({ project, ...input });
+    headers = authHeaders(config);
+  }
+  const response = await fetch(`${config.baseUrl}/skills/imports`, { method: "POST", headers, body });
+  if (!response.ok) throw await responseError(response);
+  return response.json();
+}
+
+export async function confirmSkillImport(config: ServerConfig, previewId: string): Promise<SkillConfirmation> {
+  const response = await fetch(`${config.baseUrl}/skills/imports/${encodeURIComponent(previewId)}/confirm`, {
+    method: "POST", headers: authHeaders(config), body: "{}",
+  });
+  if (!response.ok) throw await responseError(response);
+  return response.json();
+}
+
+export async function patchSkill(
+  config: ServerConfig, project: string, id: string, enabled: boolean, version?: string,
+): Promise<SkillSnapshot> {
+  const response = await fetch(`${config.baseUrl}/skills/${encodeURIComponent(id)}`, {
+    method: "PATCH", headers: authHeaders(config), body: JSON.stringify({ project, enabled, ...(version ? { version } : {}) }),
+  });
+  if (!response.ok) throw await responseError(response);
+  return response.json();
 }

@@ -4,19 +4,20 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { streamSSE, type SSEStreamingApi } from "hono/streaming";
 import { serve } from "@hono/node-server";
-import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { createReadOnlySession } from "./session-factory.js";
 import { resolveProject, resolveProjectForHistory } from "./project-resolver.js";
 import {
   closeSession,
   getSession,
+  getHistoryActiveSessionId,
   isHistoryActive,
   listSessions,
   openSession,
   runOnSession,
 } from "./session-registry.js";
 import { listModels } from "./models.js";
-import { runAsk } from "./ask.js";
+import { runAsk, type AskEvent } from "./ask.js";
+import { createSkillRoutes } from "./skill-routes.js";
 import { SessionQueue } from "./session-queue.js";
 import { LlmConfigError, parseModelOptions } from "./llm-config.js";
 import { HistoryError, listProjectHistory, validateHistorySelection } from "./session-history.js";
@@ -67,7 +68,9 @@ function makeSseWriter(stream: SSEStreamingApi) {
 }
 
 function sseHandler(write: (e: string, d: unknown) => Promise<void>) {
-  return (e: AgentSessionEvent) => {
+  return (e: AskEvent) => {
+    if (e.type === "skill_preview") { void write("skill_preview", e.preview); return; }
+    if (e.type === "skills_applied") { void write("skills_applied", e.snapshot); return; }
     if (e.type === "message_update") {
       const ev = e.assistantMessageEvent;
       if (ev.type === "text_delta") void write("text", { delta: ev.delta });
@@ -101,6 +104,7 @@ export function createApp(token: string) {
   });
 
   app.get("/health", (c) => c.json({ status: "ok" }));
+  app.route("/skills", createSkillRoutes());
 
   // 列出可用模型（需鉴权）
   app.get("/models", async (c) => {
@@ -123,6 +127,7 @@ export function createApp(token: string) {
     try {
       const sessions = (await listProjectHistory(projectPath)).map((session) => ({
         ...session, active: isHistoryActive(projectPath, session.id),
+        activeSessionId: getHistoryActiveSessionId(projectPath, session.id),
       }));
       return c.json({ projectPath, sessions });
     } catch (error) {
@@ -187,6 +192,7 @@ export function createApp(token: string) {
           answer: outcome.answer,
           modelLabel: entry.modelLabel,
           toolCalls: outcome.toolCalls,
+          skillPreviews: outcome.skillPreviews,
         });
       } catch (e) {
         return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
@@ -278,7 +284,7 @@ export function createApp(token: string) {
         (signal) => runAsk(session, body.question!, undefined, signal),
         c.req.raw.signal,
       );
-      return c.json({ answer: outcome.answer, modelLabel, toolCalls: outcome.toolCalls });
+      return c.json({ answer: outcome.answer, modelLabel, toolCalls: outcome.toolCalls, skillPreviews: outcome.skillPreviews });
     } catch (e) {
       return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
     } finally {

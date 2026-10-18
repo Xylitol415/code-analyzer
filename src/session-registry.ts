@@ -5,6 +5,8 @@ import { resolveProject } from "./project-resolver.js";
 import { SessionQueue } from "./session-queue.js";
 import { parseModelOptions, type SessionModelOptions } from "./llm-config.js";
 import { HistoryError, historyMessages, listProjectHistory, validateHistorySelection, type HistoryMessage } from "./session-history.js";
+import { getSessionSkills } from "./skills/runtime.js";
+import type { SkillSnapshot } from "./skills/types.js";
 
 export interface SessionEntry {
   id: string;
@@ -28,6 +30,12 @@ export function isHistoryActive(projectPath: string, historyId: string): boolean
   return activeHistory.has(historyKey(projectPath, historyId));
 }
 
+export function getHistoryActiveSessionId(projectPath: string, historyId: string): string | undefined {
+  for (const entry of registry.values()) {
+    if (entry.projectPath === projectPath && entry.historyId === historyId) return entry.id;
+  }
+}
+
 export interface OpenSessionOptions extends SessionModelOptions {
   project: string;
   /** 显式指定会话 id（缺省自动生成 UUID）。 */
@@ -45,13 +53,20 @@ export interface OpenSessionResult {
   resumed: boolean;
   historyId: string;
   messages: HistoryMessage[];
+  skills: SkillSnapshot["skills"];
+  skillsRevision: number;
 }
 
 function sessionResult(entry: SessionEntry): OpenSessionResult {
+  const snapshot = getSessionSkills(entry.session);
   return {
-    id: entry.id, projectPath: entry.projectPath, modelLabel: entry.modelLabel,
+    // Import previews and turn events use the store's canonical identity.
+    // Keep the transcript's original cwd internally for historical compatibility.
+    id: entry.id, projectPath: snapshot?.projectPath ?? entry.projectPath, modelLabel: entry.modelLabel,
     historyId: entry.historyId, resumed: entry.resumed,
     messages: entry.resumed ? historyMessages(entry.session.sessionManager.getBranch()) : [],
+    skills: snapshot?.skills ?? [],
+    skillsRevision: snapshot?.revision ?? 0,
   };
 }
 

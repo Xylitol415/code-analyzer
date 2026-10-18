@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { HistorySessionInfo, ModelInfo } from "../api/client";
 import { Button } from "./Button";
 import { ChevronDownIcon, PlusIcon, RobotAvatar, XIcon } from "./Icons";
@@ -26,6 +26,7 @@ export interface ConfigBarProps {
   historyStatus: HistoryStatus;
   historyError?: string;
   historyId: string;
+  releasingHistoryId: string | null;
   model: string;
   models: ModelInfo[];
   modelStatus: ModelStatus;
@@ -45,6 +46,7 @@ export interface ConfigBarProps {
   onSessionModeChange: (v: SessionMode) => void;
   onHistorySelect: (id: string) => void;
   onHistoryRefresh: () => void;
+  onHistoryRelease: (session: HistorySessionInfo) => Promise<void>;
   onModelChange: (v: string) => void;
   onModelModeChange: (v: ModelMode) => void;
   onLlmBaseUrlChange: (v: string) => void;
@@ -52,15 +54,35 @@ export interface ConfigBarProps {
   onLlmModelChange: (v: string) => void;
   onConnect: () => Promise<boolean>;
   onNewSession: () => void;
+  skillsControl?: ReactNode;
 }
 
 export function ConfigBar(props: ConfigBarProps) {
   const [expanded, setExpanded] = useState(false);
   const [showToken, setShowToken] = useState(false);
   const [connectError, setConnectError] = useState("");
+  const [releaseCandidate, setReleaseCandidate] = useState<HistorySessionInfo | null>(null);
+  const [releaseError, setReleaseError] = useState("");
   const [activeProject, setActiveProject] = useState(props.connected ? props.project.trim() : "");
   const dialogRef = useRef<HTMLDialogElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const busy = props.connecting || !!props.releasingHistoryId;
+
+  useEffect(() => {
+    setReleaseCandidate(null);
+    setReleaseError("");
+  }, [props.baseUrl, props.token, props.project, props.sessionMode, expanded]);
+
+  const releaseHistory = async () => {
+    if (!releaseCandidate || busy) return;
+    setReleaseError("");
+    try {
+      await props.onHistoryRelease(releaseCandidate);
+      setReleaseCandidate(null);
+    } catch (error) {
+      setReleaseError(error instanceof Error ? error.message : "退出失败，请重试。");
+    }
+  };
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -124,16 +146,17 @@ export function ConfigBar(props: ConfigBarProps) {
           ) : <span className="session-idle-hint">只读代码分析助手</span>}
         </div>
         <div className="session-actions">
+          {props.skillsControl}
           <span className={`session-status ${props.connected ? "is-connected" : ""}`}
             title={props.connected ? "已连接" : "未连接"}>
             <span aria-hidden="true" />{props.connected ? "已连接" : "未连接"}
           </span>
-          <button type="button" className="session-new-button" title="新建会话" aria-label="新建会话" disabled={props.connecting}
+          <button type="button" className="session-new-button" title="新建会话" aria-label="新建会话" disabled={busy}
             onClick={() => { if (props.connected) props.onNewSession(); openSession("new"); }}>
             <PlusIcon className="h-4 w-4" />新建会话
           </button>
           <button type="button" className="session-new-button session-history-button" title="历史会话" aria-label="历史会话"
-            disabled={props.connecting} onClick={() => openSession("history")}>
+            disabled={busy} onClick={() => openSession("history")}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4" aria-hidden="true">
               <path d="M3 11a9 9 0 1 1 2.7 7M3 4v7h7M12 7v5l3 2" />
             </svg>
@@ -164,7 +187,7 @@ export function ConfigBar(props: ConfigBarProps) {
             </div>
 
             <div className="session-settings-body">
-              <fieldset className="session-settings-section" disabled={props.connecting}>
+              <fieldset className="session-settings-section" disabled={busy}>
                 <legend>分析项目</legend>
                 <label className="session-field">
                   <span>项目路径或 Git URL</span>
@@ -188,26 +211,40 @@ export function ConfigBar(props: ConfigBarProps) {
                     <div className="session-history-heading">
                       <span>选择要继续的会话</span>
                       <button type="button" className="session-history-refresh" onClick={props.onHistoryRefresh}
-                        disabled={props.connecting || ["loading", "missing-token", "missing-url", "missing-project"].includes(props.historyStatus)}>
+                        disabled={busy || ["loading", "missing-token", "missing-url", "missing-project"].includes(props.historyStatus)}>
                         刷新列表
                       </button>
                     </div>
                     {props.historyStatus === "ready" && props.histories.length > 0 ? (
                       <div className="session-history-list" role="radiogroup" aria-label="选择历史记录">
                         {props.histories.map((session) => (
-                          <label key={session.id} className={`session-history-item ${props.historyId === session.id ? "is-selected" : ""} ${session.active ? "is-active" : ""}`}>
-                            <input type="radio" name="history-session" value={session.id} checked={props.historyId === session.id}
-                              disabled={props.connecting || !!session.active} onChange={() => props.onHistorySelect(session.id)} />
-                            <span className="session-history-info">
-                              <span className="session-history-title">{session.title || "未命名会话"}</span>
-                              <span className="session-history-meta">
-                                <time dateTime={session.updatedAt}>{formatHistoryDate(session.updatedAt)}</time>
-                                <span>{session.messageCount} 条消息</span>
-                                {session.modelLabel && <span title={session.modelLabel}>{session.modelLabel}</span>}
+                          <div key={session.id} className={`session-history-item ${props.historyId === session.id ? "is-selected" : ""} ${session.active ? "is-active" : ""}`}>
+                            <label className="flex min-w-0 flex-1 cursor-inherit items-center gap-3">
+                              <input type="radio" name="history-session" value={session.id} checked={props.historyId === session.id}
+                                disabled={busy || !!session.active} onChange={() => props.onHistorySelect(session.id)} />
+                              <span className="session-history-info">
+                                <span className="session-history-title">{session.title || "未命名会话"}</span>
+                                <span className="session-history-meta">
+                                  <time dateTime={session.updatedAt}>{formatHistoryDate(session.updatedAt)}</time>
+                                  <span>{session.messageCount} 条消息</span>
+                                  {session.modelLabel && <span title={session.modelLabel}>{session.modelLabel}</span>}
+                                </span>
                               </span>
-                            </span>
-                            {session.active && <span className="session-history-badge">使用中</span>}
-                          </label>
+                            </label>
+                            {session.active && (
+                              <div className="flex shrink-0 flex-col items-end gap-1.5">
+                                <span className="session-history-badge">使用中</span>
+                                {session.activeSessionId && (
+                                  <button type="button" disabled={busy}
+                                    className="rounded-md border-0 bg-transparent px-1 py-1 text-xs text-slate-600 hover:bg-slate-100 hover:text-rose-600 disabled:cursor-wait"
+                                    title="退出运行中的会话并保留历史记录"
+                                    onClick={() => { setReleaseCandidate(session); setReleaseError(""); }}>
+                                    {props.releasingHistoryId === session.id ? "正在退出…" : "退出会话"}
+                                  </button>
+                                )}
+                              </div>
+                            )}
+                          </div>
                         ))}
                       </div>
                     ) : (
@@ -221,12 +258,24 @@ export function ConfigBar(props: ConfigBarProps) {
                                   : "这个项目还没有历史会话，可以先新建会话开始分析。"}
                       </div>
                     )}
-                    <p className="session-field-hint">使用下方模型配置继续；历史会话不会恢复 API Key。使用中的会话需要先结束当前连接。</p>
+                    {releaseCandidate && (
+                      <div className="mt-3 rounded-lg border border-solid border-amber-200 bg-amber-50 p-3 text-xs leading-relaxed text-slate-600">
+                        <p className="m-0">确认退出「{releaseCandidate.title}」？这会中止正在生成的回复，并断开使用它的窗口；保留历史记录。</p>
+                        {releaseError && <p role="alert" className="mt-2 mb-0 break-words text-rose-600">{releaseError}</p>}
+                        <div className="mt-2 flex justify-end gap-2">
+                          <button type="button" className="rounded-md border-0 bg-transparent px-2 py-1.5 text-slate-600 hover:bg-amber-100"
+                            disabled={busy} onClick={() => { setReleaseCandidate(null); setReleaseError(""); }}>取消</button>
+                          <button type="button" className="rounded-md border-0 bg-rose-600 px-3 py-1.5 text-white hover:bg-rose-700 disabled:opacity-50"
+                            disabled={busy} onClick={() => { void releaseHistory(); }}>{props.releasingHistoryId ? "正在退出…" : "确认退出"}</button>
+                        </div>
+                      </div>
+                    )}
+                    <p className="session-field-hint">使用下方模型配置继续；历史会话不会恢复 API Key。页面刷新时会尝试自动退出；遗留的使用中会话可手动退出后恢复。</p>
                   </div>
                 )}
               </fieldset>
 
-              <fieldset className="session-settings-section" disabled={props.connecting}>
+              <fieldset className="session-settings-section" disabled={busy}>
                 <legend>分析服务</legend>
                 <div className="session-fields-grid">
                   <label className="session-field">
@@ -250,7 +299,7 @@ export function ConfigBar(props: ConfigBarProps) {
                 <p className="session-field-hint">Token 使用后端启动时的值（--token 参数或启动日志）。</p>
               </fieldset>
 
-              <fieldset className="session-settings-section" disabled={props.connecting}>
+              <fieldset className="session-settings-section" disabled={busy}>
                 <legend>LLM 配置</legend>
                 <div className="session-model-modes">
                   <label className={props.modelMode === "backend" ? "is-selected" : ""}>

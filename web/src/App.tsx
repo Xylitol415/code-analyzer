@@ -5,6 +5,7 @@ import { ConfigBar, type HistoryStatus, type SessionMode, type ModelMode, type M
 import { ChatMessage } from "./components/ChatMessage";
 import { MessageInput } from "./components/MessageInput";
 import { ToastContainer, useToast } from "./components/Toast";
+import { SkillsManager } from "./components/SkillsManager";
 import { SparkleIcon } from "./components/Icons";
 
 interface ModelDiscovery {
@@ -35,6 +36,7 @@ export default function App() {
   const [llmModel, setLlmModel] = useState("");
   const [discovery, setDiscovery] = useState<ModelDiscovery | null>(null);
   const [connecting, setConnecting] = useState(false);
+  const [releasingHistoryId, setReleasingHistoryId] = useState<string | null>(null);
 
   const normalizedBaseUrl = baseUrl.trim().replace(/\/+$/, "");
   const normalizedToken = token.trim();
@@ -44,6 +46,13 @@ export default function App() {
   );
   const chat = useChat(config);
   const { toasts, show } = useToast();
+  const skillsConfig = chat.activeConfig ?? config;
+  const skillsProject = chat.sessionId ? chat.projectPath ?? "" : project.trim();
+  const skillsBinding = useMemo(() => ({
+    config: skillsConfig, project: skillsProject, connected: !!chat.sessionId,
+  }), [chat.sessionId, skillsConfig, skillsProject]);
+  // A new binding owns a fresh dialog and revokes all pending preview/confirm UI.
+  const skillsBindingKey = useMemo(() => crypto.randomUUID(), [skillsBinding]);
   // Only expose results belonging to the current address and token, even before
   // the effect cleanup runs after a configuration change.
   const currentDiscovery = discovery?.config === config ? discovery : null;
@@ -73,12 +82,24 @@ export default function App() {
           : currentHistory.error ? "error" : "ready";
   const selectedHistory = histories.find((session) => session.id === historyId && !session.active);
   const canConnect = !!project.trim() && !!config.baseUrl && !!config.token && selectionReady
-    && (sessionMode === "new" || !!selectedHistory) && !connecting;
+    && (sessionMode === "new" || !!selectedHistory) && !connecting && !releasingHistoryId;
 
   const refreshHistory = () => setHistoryRevision((revision) => revision + 1);
   const changeSessionMode = (mode: SessionMode) => {
     setSessionMode(mode);
     if (mode === "history") refreshHistory();
+  };
+
+  const releaseHistory = async (session: HistorySessionInfo) => {
+    if (!session.activeSessionId || releasingHistoryId) return;
+    setReleasingHistoryId(session.id);
+    try {
+      await chat.disconnect(session.activeSessionId, config);
+      refreshHistory();
+      show("success", "会话已退出，历史记录已保留");
+    } finally {
+      setReleasingHistoryId(null);
+    }
   };
 
   useEffect(() => {
@@ -170,6 +191,7 @@ export default function App() {
         historyStatus={historyStatus}
         historyError={currentHistory?.error}
         historyId={selectedHistory?.id ?? ""}
+        releasingHistoryId={releasingHistoryId}
         model={model}
         models={models}
         modelStatus={modelStatus}
@@ -189,6 +211,7 @@ export default function App() {
         onSessionModeChange={changeSessionMode}
         onHistorySelect={setHistoryId}
         onHistoryRefresh={refreshHistory}
+        onHistoryRelease={releaseHistory}
         onModelChange={setModel}
         onModelModeChange={setModelMode}
         onLlmBaseUrlChange={setLlmBaseUrl}
@@ -196,6 +219,7 @@ export default function App() {
         onLlmModelChange={setLlmModel}
         onConnect={handleConnect}
         onNewSession={chat.newSession}
+        skillsControl={<SkillsManager key={skillsBindingKey} binding={skillsBinding} appliedCount={chat.skills.length} appliedRevision={chat.skillsRevision} />}
       />
 
       <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
@@ -206,7 +230,7 @@ export default function App() {
               <p className="text-sm">通过右上角新建会话，或选择历史会话继续分析</p>
             </div>
           ) : (
-            chat.messages.map((m) => <ChatMessage key={m.id} message={m} />)
+            chat.messages.map((m) => <ChatMessage key={m.id} message={m} onConfirmSkill={chat.confirmSkillPreview} />)
           )}
         </div>
       </div>

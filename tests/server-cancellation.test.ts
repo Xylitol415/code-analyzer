@@ -107,8 +107,18 @@ test("real HTTP disconnect cancels the upstream model before or during output an
     await within(started.promise, "The local provider did not receive the request");
     if (output === "partial") {
       const reader = response.body!.getReader();
-      const first = await reader.read();
-      assert.match(new TextDecoder().decode(first.value), /Partial answer/);
+      const decoder = new TextDecoder();
+      let received = "";
+      // Per-turn skill metadata can precede model text, and HTTP chunks need
+      // not align with SSE frames. Wait for the actual partial model answer.
+      await within((async () => {
+        while (!received.includes("Partial answer")) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          received += decoder.decode(chunk.value, { stream: true });
+        }
+      })(), "The partial model answer did not reach the browser stream");
+      assert.match(received, /Partial answer/);
       reader.releaseLock();
     }
     controller.abort();
