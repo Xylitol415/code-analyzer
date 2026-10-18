@@ -51,12 +51,23 @@ cd web && npm install && npm run dev                 # 终端 2：前端，打�
 
 各方式的详细参数与说明见下文各节。
 
-## 特性
+## 主要功能
 
-- **严格只读**：只暴露 `read / grep / find / ls` + 一个自定义只读 `git` 工具（白名单子命令），**不含** `bash / edit / write`。只读是结构性保证，不是提示词约束。
+**核心能力**
+
+- **严格只读的代码分析**：只暴露 `read / grep / find / ls` + 一个自定义只读 `git` 工具（白名单子命令），**不含** `bash / edit / write`。只读是结构性保证，不是提示词约束。
 - **交互式多轮问答**：流式输出，可无限追问；会话按项目路径持久化，下次进入同一项目自动恢复上下文。
-- **过程可视化**：实时展示模型的思考过程（reasoning，暗色内联）与工具调用（工具名、参数、耗时、结果预览）。
+- **过程可视化**：实时展示模型的思考过程（reasoning）与工具调用（工具名、参数、耗时、结果预览）。
 - **本地路径 + 远程 URL 都支持**：URL 自动浅克隆到 `~/.code-analyzer/repos/<hash>`，已克隆则复用。
+- **可配置的模型与凭据**：通过 `.env` / 环境变量覆盖 API key、模型、base URL，或复用本机 pi 配置。
+
+**三种使用形态**
+
+| 形态 | 说明 |
+|------|------|
+| 终端 REPL | 命令行交互式分析，零依赖快速上手 |
+| HTTP 服务 | SSE 流式 + JSON，供 API / 脚本 / 前端调用 |
+| Web 网页 | React 聊天界面，浏览器里可视化提问 |
 
 ## 用法
 
@@ -201,6 +212,49 @@ cd web && npm install && npm run dev
 页面上填写「后端地址 + Token + 项目路径」→ 点「建会话」→ 即可在聊天框提问。
 
 功能：流式回答（markdown 渲染）、思考过程/工具调用可折叠查看、多轮追问、新建会话、停止回答。
+
+## 架构与设计
+
+### 目录结构
+
+```
+code-analyzer/
+├── src/                        # 后端（Node + TypeScript + pi SDK）
+│   ├── main.ts                 # CLI 入口（参数解析）
+│   ├── project-resolver.ts     # 识别本地路径 / 远程 URL，URL 自动 clone
+│   ├── session-factory.ts      # 核心：创建只读会话 + 模型/key/baseURL 解析
+│   ├── git-tool.ts             # 自定义只读 git 工具（白名单子命令）
+│   ├── repl.ts                 # 终端 REPL（流式 + 思考/工具可视化）
+│   ├── server.ts               # HTTP 服务（Hono，SSE + JSON，Bearer 鉴权）
+│   ├── session-registry.ts     # 会话注册表 + 每会话串行队列
+│   └── config.ts               # .env / 环境变量加载
+└── web/                        # 前端（React + Ant Design + Tailwind）
+    └── src/ ...
+```
+
+### 分层与复用
+
+`session-factory.ts` 是三种形态共用的核心：负责创建只读会话（工具集、系统提示词、模型/凭据解析）。REPL、HTTP 服务、Web 前端都只是它的「前端」，各自负责与用户 / 客户端交互。
+
+```
+project-resolver（解析项目路径）
+        ↓
+session-factory（只读会话 + 模型/凭据 + 系统提示词）
+        ↓
+   ┌────┴──────┬──────────┐
+  REPL        HTTP 服务    Web 前端
+(repl.ts)   (server.ts)  (web/，走 HTTP SSE)
+```
+
+### 关键设计决策
+
+1. **严格只读 = 结构性保证**：通过 `tools` 白名单只启用 `read/grep/find/ls` + 自定义只读 `git` 工具，模型拿不到任何写文件 / 执行任意命令的能力，而非依赖提示词约束。
+2. **会话持久化**：用 pi SDK 的 `SessionManager` 按项目路径持久化会话，`resume` 时恢复上下文。
+3. **模型显式解析**：`ModelRuntime.create()` + `getModel` / `getAvailable` 显式选模型，默认优先 `deepseek/deepseek-v4-pro`，避免配置里失效的 `defaultModel` 导致静默失败。
+4. **配置优先级**：`--model` / HTTP `modelId` > 系统环境变量 > `.env` 文件 > 全局 `~/.pi/agent`。
+5. **并发模型**：pi 的单会话同一时刻只允许一个 prompt，因此每个会话挂一条串行队列；不同会话之间并行。
+6. **SSE 事件协议**：后端把 SDK 的底层事件映射为 `thinking / tool / text / done / error` 五类 SSE 事件，前端逐帧消费，实现近实时流式。
+7. **安全**：`.env` 已被 `.gitignore` 忽略，凭据不落库；HTTP 服务默认绑 `127.0.0.1` + Bearer token 鉴权。
 
 ## 开发
 
