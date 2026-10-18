@@ -14,6 +14,7 @@ import {
   runOnSession,
   type SessionEntry,
 } from "./session-registry.js";
+import { listModels } from "./models.js";
 
 // ---------------- 参数解析 ----------------
 interface ServerArgs {
@@ -138,6 +139,15 @@ app.use("*", async (c, next) => {
 });
 
 app.get("/health", (c) => c.json({ status: "ok" }));
+
+// 列出可用模型（需鉴权）
+app.get("/models", async (c) => {
+  try {
+    return c.json(await listModels());
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
+  }
+});
 
 // 建/恢复会话
 app.post("/sessions", async (c) => {

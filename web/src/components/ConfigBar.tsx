@@ -1,4 +1,5 @@
 import { useState } from "react";
+import type { ModelInfo } from "../api/client";
 import { Button } from "./Button";
 import { RobotAvatar } from "./Icons";
 
@@ -10,6 +11,8 @@ export interface ConfigBarProps {
   token: string;
   project: string;
   resume: boolean;
+  model: string;
+  models: ModelInfo[];
   connecting: boolean;
   connected: boolean;
   modelLabel: string | null;
@@ -17,6 +20,7 @@ export interface ConfigBarProps {
   onTokenChange: (v: string) => void;
   onProjectChange: (v: string) => void;
   onResumeChange: (v: boolean) => void;
+  onModelChange: (v: string) => void;
   onConnect: () => void;
   onNewSession: () => void;
 }
@@ -33,7 +37,7 @@ export function ConfigBar(props: ConfigBarProps) {
         </div>
 
         <input
-          className={`${inputClass} w-44`}
+          className={`${inputClass} w-40`}
           placeholder="后端地址"
           value={props.baseUrl}
           onChange={(e) => props.onBaseUrlChange(e.target.value)}
@@ -42,7 +46,7 @@ export function ConfigBar(props: ConfigBarProps) {
 
         <div className="relative">
           <input
-            className={`${inputClass} w-44 pr-14`}
+            className={`${inputClass} w-40 pr-14`}
             type={showToken ? "text" : "password"}
             placeholder="Token"
             value={props.token}
@@ -59,12 +63,28 @@ export function ConfigBar(props: ConfigBarProps) {
         </div>
 
         <input
-          className={`${inputClass} w-56`}
+          className={`${inputClass} w-48`}
           placeholder="项目路径 或 git URL"
           value={props.project}
           onChange={(e) => props.onProjectChange(e.target.value)}
           disabled={props.connecting}
         />
+
+        <label className="flex items-center gap-1.5 text-sm text-slate-600">
+          <span className="text-xs font-medium text-slate-500">模型</span>
+          <select
+            className={`${inputClass} w-44 cursor-pointer pr-8`}
+            value={props.model}
+            onChange={(e) => props.onModelChange(e.target.value)}
+            disabled={props.connecting}
+          >
+            {props.models.map((m) => (
+              <option key={`${m.provider}/${m.id}`} value={`${m.provider}/${m.id}`}>
+                {m.name}
+              </option>
+            ))}
+          </select>
+        </label>
 
         <label className="flex cursor-pointer items-center gap-1.5 text-sm text-slate-600">
           <input

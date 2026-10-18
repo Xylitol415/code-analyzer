@@ -12,7 +12,7 @@ export interface UseChatApi {
   sessionId: string | null;
   modelLabel: string | null;
   streaming: boolean;
-  connect: (project: string, resume: boolean) => Promise<void>;
+  connect: (project: string, resume: boolean, modelId?: string) => Promise<void>;
   send: (question: string) => Promise<void>;
   stop: () => void;
   newSession: () => void;
@@ -166,8 +166,8 @@ export function useChat(config: ServerConfig): UseChatApi {
   );
 
   const connect = useCallback(
-    async (project: string, resume: boolean) => {
-      const s = await createSession(config, project, resume);
+    async (project: string, resume: boolean, modelId?: string) => {
+      const s = await createSession(config, project, resume, modelId);
       sessionIdRef.current = s.id;
       setSessionId(s.id);
       setModelLabel(s.modelLabel);

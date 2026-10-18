@@ -13,6 +13,17 @@ export interface SessionInfo {
   resumed: boolean;
 }
 
+export interface ModelInfo {
+  provider: string;
+  id: string;
+  name: string;
+}
+
+export interface ModelList {
+  models: ModelInfo[];
+  default: string;
+}
+
 function authHeaders(config: ServerConfig): Record<string, string> {
   return {
     "Content-Type": "application/json",
@@ -24,11 +35,25 @@ export async function createSession(
   config: ServerConfig,
   project: string,
   resume = false,
+  modelId?: string,
 ): Promise<SessionInfo> {
+  const body: Record<string, unknown> = { project, resume };
+  if (modelId) body.modelId = modelId;
   const res = await fetch(`${config.baseUrl}/sessions`, {
     method: "POST",
     headers: authHeaders(config),
-    body: JSON.stringify({ project, resume }),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function listModels(config: ServerConfig): Promise<ModelList> {
+  const res = await fetch(`${config.baseUrl}/models`, {
+    headers: authHeaders(config),
   });
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { error?: string };

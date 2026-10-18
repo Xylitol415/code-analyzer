@@ -151,7 +151,8 @@ npm run serve -- --port 8787 --token my-secret-key
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/health` | 健康检查（免鉴权） |
-| POST | `/sessions` | 建会话，body `{project, resume?, modelId?, sessionId?}` → `{id, projectPath, modelLabel}` |
+| GET | `/models` | 列出可用模型 + 默认推荐（`{models:[{provider,id,name}], default}`） |
+| POST | `/sessions` | 建会话，body `{project, resume?, modelId?, sessionId?}` → `{id, projectPath, modelLabel, resumed}` |
 | GET | `/sessions` | 列出活动会话 |
 | POST | `/sessions/:id/ask` | 提问，body `{question}`；默认 SSE 流式，`?stream=false` 返回 JSON |
 | DELETE | `/sessions/:id` | 释放会话 |

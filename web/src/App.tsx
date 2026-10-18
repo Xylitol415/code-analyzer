@@ -1,21 +1,56 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useChat } from "./hooks/useChat";
+import { listModels, type ModelInfo } from "./api/client";
 import { ConfigBar } from "./components/ConfigBar";
 import { ChatMessage } from "./components/ChatMessage";
 import { MessageInput } from "./components/MessageInput";
 import { ToastContainer, useToast } from "./components/Toast";
 import { SparkleIcon } from "./components/Icons";
 
+const FALLBACK_MODELS: ModelInfo[] = [
+  { provider: "deepseek", id: "deepseek-v4-pro", name: "DeepSeek V4 Pro" },
+  { provider: "deepseek", id: "deepseek-flash", name: "DeepSeek V4.1 Flash" },
+];
+const DEFAULT_MODEL = "deepseek/deepseek-v4-pro";
+
 export default function App() {
   const [baseUrl, setBaseUrl] = useState("http://127.0.0.1:8787");
   const [token, setToken] = useState("");
   const [project, setProject] = useState("");
   const [resume, setResume] = useState(false);
+  const [model, setModel] = useState(DEFAULT_MODEL);
+  const [models, setModels] = useState<ModelInfo[]>(FALLBACK_MODELS);
   const [connecting, setConnecting] = useState(false);
 
   const config = useMemo(() => ({ baseUrl: baseUrl.replace(/\/+$/, ""), token }), [baseUrl, token]);
   const chat = useChat(config);
   const { toasts, show } = useToast();
+
+  // 填好 token 后自动拉取可用模型（带防抖，失败兜底硬编码 deepseek）
+  useEffect(() => {
+    let cancelled = false;
+    if (!config.token) {
+      setModels(FALLBACK_MODELS);
+      setModel(DEFAULT_MODEL);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      listModels(config)
+        .then((r) => {
+          if (cancelled) return;
+          setModels(r.models.length ? r.models : FALLBACK_MODELS);
+          setModel(r.default || DEFAULT_MODEL);
+        })
+        .catch(() => {
+          if (cancelled) return;
+          setModels(FALLBACK_MODELS);
+        });
+    }, 400);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [config]);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -26,7 +61,7 @@ export default function App() {
     if (!project.trim()) return;
     setConnecting(true);
     try {
-      await chat.connect(project.trim(), resume);
+      await chat.connect(project.trim(), resume, model);
       show("success", "会话已建立");
     } catch (e) {
       show("error", (e as Error).message);
@@ -42,6 +77,8 @@ export default function App() {
         token={token}
         project={project}
         resume={resume}
+        model={model}
+        models={models}
         connecting={connecting}
         connected={!!chat.sessionId}
         modelLabel={chat.modelLabel}
@@ -49,6 +86,7 @@ export default function App() {
         onTokenChange={setToken}
         onProjectChange={setProject}
         onResumeChange={setResume}
+        onModelChange={setModel}
         onConnect={handleConnect}
         onNewSession={chat.newSession}
       />
