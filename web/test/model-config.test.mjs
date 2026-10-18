@@ -55,12 +55,17 @@ async function setup(t, { openConfig = true } = {}) {
   const harness = {
     requests,
     get select() { return root.root.findByType("select"); },
-    get connect() { return root.root.findAllByType("button").find((button) => button.children.includes("建会话")); },
+    get connect() { return root.root.findAllByType("button").find((button) => button.props["aria-label"] === "连接会话" || button.children.includes("建会话")); },
     get models() { return root.root.findAllByType("option").filter((option) => option.props.value).map((option) => option.props.value); },
     get text() { return JSON.stringify(root.toJSON()); },
     get visibleText() { return visibleText(root.toJSON()); },
     get configButton() { return findButton("会话配置"); },
     get dialogs() { return root.root.findAllByProps({ role: "dialog", "aria-label": "会话配置" }); },
+    get historyOptions() { return root.root.findAllByProps({ name: "history-session" }); },
+    async openHistory() { await act(async () => { root.root.findByProps({ "aria-label": "历史会话" }).props.onClick(); }); },
+    async sessionMode(value) { await act(async () => { root.root.findByProps({ name: "session-mode", value }).props.onChange(); }); },
+    async selectHistory(id) { await act(async () => { root.root.findByProps({ name: "history-session", value: id }).props.onChange(); }); },
+    async refreshHistory() { await act(async () => { findButton("刷新列表").props.onClick(); }); },
     get configInputs() { return root.root.findAllByProps({ placeholder: "Token" }); },
     inputValue(placeholder) { return root.root.findByProps({ placeholder }).props.value; },
     async openConfig() { await act(async () => { findButton("会话配置").props.onClick(); }); },
@@ -76,7 +81,7 @@ async function setup(t, { openConfig = true } = {}) {
       await act(async () => { root.root.findByProps({ type: "radio", value }).props.onChange(); });
     },
     async clickConnect() {
-      await act(async () => { void root.root.findAllByType("button").find((button) => button.children.includes("建会话")).props.onClick(); });
+      await act(async () => { void harness.connect.props.onClick(); });
     },
     async flushTimers() {
       await act(async () => {
@@ -314,4 +319,127 @@ test("switching back to a backend model never submits custom LLM credentials", a
   const request = h.requests.find((request) => request.method === "POST");
   assert.deepEqual(JSON.parse(request.body), { project: "/project", resume: false, modelId: "openai-codex/gpt-5-mini" });
   assert.doesNotMatch(request.body, /custom-secret|gateway/);
+});
+
+
+const histories = {
+  projectPath: "/connected-project",
+  sessions: [
+    { id: "history-older", title: "分析 Raft 选举流程", createdAt: "2026-10-17T10:00:00.000Z", updatedAt: "2026-10-18T10:00:00.000Z", messageCount: 8, modelLabel: "openai/gpt-example" },
+    { id: "history-active", title: "正在使用的会话", createdAt: "2026-10-18T11:00:00.000Z", updatedAt: "2026-10-18T11:00:00.000Z", messageCount: 2, active: true },
+  ],
+};
+
+function historyRequest(h) { return h.requests.findLastIndex((request) => request.url.includes("/history?")); }
+
+test("history is an explicit startup choice and loads only after selecting it", async (t) => {
+  const h = await setup(t);
+  await configureCustomSession(h);
+  await h.flushTimers();
+  assert.equal(historyRequest(h), -1);
+  await h.closeConfig();
+  await h.openHistory();
+  assert.equal(h.dialogs.length, 1);
+  assert.equal(h.connect.props.disabled, true);
+  await h.flushTimers();
+  const index = historyRequest(h);
+  assert.match(h.requests[index].url, /history\?project=%2Fconnected-project$/);
+  assert.equal(h.requests[index].headers.Authorization, "Bearer backend-token");
+  await h.reply(index, histories);
+  assert.equal(h.historyOptions.length, 2);
+  assert.match(h.visibleText, /分析 Raft 选举流程/);
+  assert.match(h.visibleText, /8 条消息/);
+  assert.match(h.visibleText, /openai\/gpt-example/);
+  assert.match(h.visibleText, /使用中/);
+  assert.equal(h.historyOptions.find((option) => option.props.value === "history-active").props.disabled, true);
+  assert.equal(h.connect.props.disabled, true, "never automatically selects the newest history");
+});
+
+test("opening a selected historical session submits its ID and displays restored messages without a greeting", async (t) => {
+  const h = await setup(t);
+  await configureCustomSession(h);
+  await h.sessionMode("history");
+  await h.flushTimers();
+  await h.reply(historyRequest(h), histories);
+  await h.selectHistory("history-older");
+  assert.equal(h.connect.props.disabled, false);
+  assert.match(h.visibleText, /使用下方模型配置继续/);
+  await h.clickConnect();
+  const create = h.requests.findLastIndex((request) => request.method === "POST");
+  assert.equal(JSON.parse(h.requests[create].body).historyId, "history-older");
+  assert.equal(JSON.parse(h.requests[create].body).resume, false);
+  await h.reply(create, {
+    id: "restored-session", modelLabel: "org/custom-model", resumed: true,
+    messages: [{ id: "old-question", role: "user", content: "历史问题", thinking: "", tools: [], streaming: false }, { id: "old-reply", role: "assistant", content: "历史回答", thinking: "", tools: [], streaming: false }],
+  });
+  assert.equal(h.dialogs.length, 0);
+  assert.match(h.visibleText, /历史问题/);
+  assert.match(h.visibleText, /历史回答/);
+  assert.equal(h.requests.filter((request) => request.url.endsWith("/ask")).length, 0);
+});
+
+test("changing the project or backend token immediately invalidates selected history and ignores old results", async (t) => {
+  const h = await setup(t);
+  await configureCustomSession(h);
+  await h.sessionMode("history");
+  await h.flushTimers();
+  await h.reply(historyRequest(h), histories);
+  await h.selectHistory("history-older");
+  assert.equal(h.connect.props.disabled, false);
+  await h.input("项目路径 或 git URL", "/other-project");
+  assert.equal(h.connect.props.disabled, true);
+  assert.equal(h.historyOptions.length, 0);
+  await h.flushTimers();
+  const stale = historyRequest(h);
+  await h.input("Token", "changed-token");
+  assert.equal(h.historyOptions.length, 0);
+  await h.flushTimers();
+  await h.reply(historyRequest(h), { projectPath: "/other-project", sessions: [] });
+  await h.reply(stale, histories);
+  assert.equal(h.historyOptions.length, 0);
+  assert.match(h.visibleText, /还没有历史会话/);
+  assert.equal(h.connect.props.disabled, true);
+});
+
+test("history errors are visible, refresh clears errors, and returning to new mode needs no history selection", async (t) => {
+  const h = await setup(t);
+  await configureCustomSession(h);
+  await h.sessionMode("history");
+  await h.flushTimers();
+  await h.reply(historyRequest(h), { error: "unauthorized" }, 401);
+  assert.match(h.visibleText, /401/);
+  assert.match(h.visibleText, /后端.*Token/);
+  await h.refreshHistory();
+  assert.doesNotMatch(h.visibleText, /401/);
+  await h.flushTimers();
+  await h.reply(historyRequest(h), { projectPath: "/connected-project", sessions: [] });
+  assert.match(h.visibleText, /还没有历史会话/);
+  await h.sessionMode("new");
+  assert.equal(h.connect.props.disabled, false);
+  await h.clickConnect();
+  const request = h.requests.findLast((request) => request.method === "POST");
+  assert.equal(JSON.parse(request.body).historyId, undefined);
+  assert.equal(JSON.parse(request.body).resume, false);
+});
+
+test("reopening configuration refreshes historical session ownership while keeping model drafts", async (t) => {
+  const h = await setup(t);
+  await configureCustomSession(h);
+  await h.sessionMode("history");
+  await h.flushTimers();
+  await h.reply(historyRequest(h), histories);
+  await h.selectHistory("history-older");
+  await h.clickConnect();
+  const create = h.requests.findLastIndex((request) => request.method === "POST");
+  await h.reply(create, { id: "restored-session", modelLabel: "org/custom-model", resumed: true, messages: [] });
+  assert.equal(h.dialogs.length, 0);
+  await h.openConfig();
+  assert.equal(h.connect.props.disabled, true, "must not reuse a selected history that is now in use");
+  assert.equal(h.historyOptions.length, 0);
+  assert.equal(h.inputValue("LLM API Key（可选）"), "session-secret");
+  assert.equal(h.inputValue("模型名"), "org/custom-model");
+  await h.flushTimers();
+  await h.reply(historyRequest(h), { ...histories, sessions: histories.sessions.map((session) => ({ ...session, active: true })) });
+  assert.equal(h.historyOptions.every((option) => option.props.disabled), true);
+  assert.equal(h.connect.props.disabled, true);
 });

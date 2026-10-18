@@ -6,10 +6,11 @@ import { streamSSE, type SSEStreamingApi } from "hono/streaming";
 import { serve } from "@hono/node-server";
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { createReadOnlySession } from "./session-factory.js";
-import { resolveProject } from "./project-resolver.js";
+import { resolveProject, resolveProjectForHistory } from "./project-resolver.js";
 import {
   closeSession,
   getSession,
+  isHistoryActive,
   listSessions,
   openSession,
   runOnSession,
@@ -18,6 +19,7 @@ import { listModels } from "./models.js";
 import { runAsk } from "./ask.js";
 import { SessionQueue } from "./session-queue.js";
 import { LlmConfigError, parseModelOptions } from "./llm-config.js";
+import { HistoryError, listProjectHistory, validateHistorySelection } from "./session-history.js";
 
 // ---------------- 参数解析 ----------------
 interface ServerArgs {
@@ -109,15 +111,36 @@ export function createApp(token: string) {
     }
   });
 
+  app.get("/history", async (c) => {
+    const project = c.req.query("project")?.trim();
+    if (!project) return c.json({ error: "missing 'project'" }, 400);
+    let projectPath: string;
+    try {
+      projectPath = resolveProjectForHistory(project);
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+    }
+    try {
+      const sessions = (await listProjectHistory(projectPath)).map((session) => ({
+        ...session, active: isHistoryActive(projectPath, session.id),
+      }));
+      return c.json({ projectPath, sessions });
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
+    }
+  });
+
   // 建/恢复会话
   app.post("/sessions", async (c) => {
-    let body: { project?: string; sessionId?: string; resume?: boolean; modelId?: string };
+    let body: { project?: string; sessionId?: string; resume?: boolean; modelId?: string; historyId?: string };
     let modelOptions: ReturnType<typeof parseModelOptions>;
     try {
       body = await c.req.json();
       modelOptions = parseModelOptions(body);
+      validateHistorySelection(body);
+      if (body.resume !== undefined && typeof body.resume !== "boolean") return c.json({ error: "resume must be boolean" }, 400);
     } catch (e) {
-      if (e instanceof LlmConfigError) return c.json({ error: e.message }, 400);
+      if (e instanceof LlmConfigError || e instanceof HistoryError) return c.json({ error: e.message }, 400);
       return c.json({ error: "invalid json body" }, 400);
     }
     if (typeof body.project !== "string" || !body.project.trim()) return c.json({ error: "missing 'project'" }, 400);
@@ -126,10 +149,12 @@ export function createApp(token: string) {
         project: body.project,
         sessionId: body.sessionId,
         resume: body.resume,
+        historyId: body.historyId,
         ...modelOptions,
       });
       return c.json(r);
     } catch (e) {
+      if (e instanceof HistoryError) return c.json({ error: e.message }, e.status);
       return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
     }
   });

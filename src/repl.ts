@@ -169,6 +169,7 @@ export async function startRepl(session: AgentSession, options: ReplOptions = {}
       }
     }
   } finally {
+    rl.close();
     unsubscribe();
     session.dispose();
   }

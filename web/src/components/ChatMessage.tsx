@@ -1,5 +1,6 @@
 import type { ChatMessage as Msg, ToolCall } from "../types";
 import { Markdown } from "./Markdown";
+import { CopyReplyButton } from "./CopyReplyButton";
 import { ChevronDownIcon, RobotAvatar, StopIcon, UserAvatar } from "./Icons";
 import { Spinner } from "./Spinner";
 
@@ -44,7 +45,7 @@ export function ChatMessage({ message }: { message: Msg }) {
                 </summary>
                 <div className="mt-1.5 space-y-1">
                   {message.tools.map((t, i) => (
-                    <ToolRow key={i} tool={t} stopped={!!message.stopped} />
+                    <ToolRow key={i} tool={t} stopped={!!message.stopped} streaming={message.streaming} />
                   ))}
                 </div>
               </details>
@@ -54,7 +55,7 @@ export function ChatMessage({ message }: { message: Msg }) {
 
         {hasContent ? (
           <div className="markdown-body">
-            <Markdown>{message.content}</Markdown>
+            <Markdown streaming={message.streaming && !message.stopped}>{message.content}</Markdown>
           </div>
         ) : message.streaming && !message.stopped ? (
           <div className="flex items-center gap-2 py-2 text-sm text-slate-400">
@@ -76,16 +77,18 @@ export function ChatMessage({ message }: { message: Msg }) {
         ) : null}
 
         {message.error && <div className="mt-2 text-sm text-red-500">错误：{message.error}</div>}
+        {hasContent && !message.streaming && <CopyReplyButton content={message.content} />}
       </div>
     </div>
   );
 }
 
-function ToolRow({ tool, stopped }: { tool: ToolCall; stopped: boolean }) {
+function ToolRow({ tool, stopped, streaming }: { tool: ToolCall; stopped: boolean; streaming: boolean }) {
+  const unfinishedLabel = stopped ? "已停止等待工具结果" : "未收到工具结果";
   return (
     <div className="flex items-center gap-2 text-xs text-slate-600">
-      {tool.isError === undefined && stopped ? (
-        <span title="已停止等待工具结果" aria-label="已停止等待工具结果" className="inline-flex text-slate-400">
+      {tool.isError === undefined && (stopped || !streaming) ? (
+        <span title={unfinishedLabel} aria-label={unfinishedLabel} className="inline-flex text-slate-400">
           <StopIcon className="h-3 w-3" />
         </span>
       ) : tool.isError === undefined ? (

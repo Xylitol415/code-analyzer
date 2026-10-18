@@ -1,4 +1,6 @@
-import ReactMarkdown from "react-markdown";
+import { createContext, memo, useContext, useMemo } from "react";
+import ReactMarkdown, { type Components } from "react-markdown";
+import { MermaidDiagram } from "./MermaidDiagram";
 import remarkGfm from "remark-gfm";
 import { PrismLight as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
@@ -61,29 +63,50 @@ register("ini", ini);
 register("markdown", markdown);
 register("diff", diff);
 
-export function Markdown({ children }: { children: string }) {
-  return (
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
-      components={{
-        code({ node: _node, className, children, ...rest }) {
-          const match = /language-(\w+)/.exec(className || "");
-          if (match) {
-            return (
-              <SyntaxHighlighter language={match[1]} style={oneDark} PreTag="div">
-                {String(children).replace(/\n$/, "")}
-              </SyntaxHighlighter>
-            );
-          }
-          return (
-            <code className={className} {...rest}>
-              {children}
-            </code>
-          );
-        },
-      }}
-    >
-      {children}
-    </ReactMarkdown>
-  );
+const MarkdownContext = createContext({ source: "", streaming: false });
+
+// The parser's node range includes the original fences, unlike code.children.
+// Check the closing marker so a syntactically valid but unfinished stream is not
+// rendered early. Prefixes account for fenced blocks in lists and blockquotes.
+function hasClosingFence(raw: string): boolean {
+  const lines = raw.trimEnd().split(/\r?\n/);
+  if (lines.length < 2) return false;
+  const opening = /^(`{3,}|~{3,})/.exec(lines[0]);
+  const closing = /^(?:[ \t]*>[ \t]*)*[ \t]*(`{3,}|~{3,})[ \t]*$/.exec(lines.at(-1)!);
+  return !!opening && !!closing && opening[1][0] === closing[1][0] && closing[1].length >= opening[1].length;
 }
+
+// Stable component identities keep completed diagrams mounted as later tokens arrive.
+const components: Components = {
+  pre({ node, children, ...rest }) {
+    const { source, streaming } = useContext(MarkdownContext);
+    const code = node?.children.find((child) => child.type === "element" && child.tagName === "code");
+    if (code?.type === "element" && Array.isArray(code.properties.className) &&
+        code.properties.className.some((name) => String(name).toLowerCase() === "language-mermaid")) {
+      const definition = code.children.map((child) => child.type === "text" ? child.value : "").join("").replace(/\n$/, "");
+      const raw = source.slice(node?.position?.start.offset, node?.position?.end.offset);
+      return <MermaidDiagram source={definition} complete={hasClosingFence(raw)} streaming={streaming} />;
+    }
+    return <pre {...rest}>{children}</pre>;
+  },
+  code({ node: _node, className, children, ...rest }) {
+    const match = /language-([\w+-]+)/.exec(className || "");
+    if (match) {
+      return (
+        <SyntaxHighlighter language={match[1]} style={oneDark} PreTag="div">
+          {String(children).replace(/\n$/, "")}
+        </SyntaxHighlighter>
+      );
+    }
+    return <code className={className} {...rest}>{children}</code>;
+  },
+};
+
+export const Markdown = memo(function Markdown({ children, streaming = false }: { children: string; streaming?: boolean }) {
+  const context = useMemo(() => ({ source: children, streaming }), [children, streaming]);
+  return (
+    <MarkdownContext.Provider value={context}>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>{children}</ReactMarkdown>
+    </MarkdownContext.Provider>
+  );
+});

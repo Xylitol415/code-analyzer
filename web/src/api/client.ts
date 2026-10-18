@@ -1,5 +1,5 @@
 import { fetchEventSource } from "@microsoft/fetch-event-source";
-import type { SseEventName } from "../types";
+import type { ChatMessage, SseEventName } from "../types";
 
 export interface ServerConfig {
   baseUrl: string;
@@ -11,6 +11,23 @@ export interface SessionInfo {
   projectPath: string;
   modelLabel: string;
   resumed: boolean;
+  historyId?: string;
+  messages?: ChatMessage[];
+}
+
+export interface HistorySessionInfo {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  messageCount: number;
+  modelLabel?: string;
+  active?: boolean;
+}
+
+export interface HistoryList {
+  projectPath: string;
+  sessions: HistorySessionInfo[];
 }
 
 export interface LlmConfig {
@@ -53,8 +70,10 @@ export async function createSession(
   project: string,
   resume = false,
   model?: SessionModel,
+  historyId?: string,
 ): Promise<SessionInfo> {
   const body: Record<string, unknown> = { project, resume };
+  if (historyId) body.historyId = historyId;
   if (typeof model === "string" && model) body.modelId = model;
   else if (model && typeof model === "object") body.llm = model.llm;
   const res = await fetch(`${config.baseUrl}/sessions`, {
@@ -87,6 +106,14 @@ export async function listModels(config: ServerConfig): Promise<ModelList> {
   if (!res.ok) {
     throw await responseError(res);
   }
+  return res.json();
+}
+
+export async function listHistory(config: ServerConfig, project: string): Promise<HistoryList> {
+  const res = await fetch(`${config.baseUrl}/history?project=${encodeURIComponent(project)}`, {
+    headers: authHeaders(config),
+  });
+  if (!res.ok) throw await responseError(res);
   return res.json();
 }
 

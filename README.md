@@ -56,7 +56,7 @@ cd web && npm install && npm run dev                 # 终端 2：前端，打�
 **核心能力**
 
 - **严格只读的代码分析**：只暴露 `read / grep / find / ls` + 一个自定义只读 `git` 工具（白名单子命令），**不含** `bash / edit / write`。只读是结构性保证，不是提示词约束。
-- **交互式多轮问答**：流式输出，可无限追问；会话按项目路径持久化，下次进入同一项目自动恢复上下文。
+- **交互式多轮问答与历史列表**：流式输出，可无限追问；会话按项目路径持久化，网页和终端均可选择新建，或从历史列表恢复任意一次讨论。
 - **过程可视化**：实时展示模型的思考过程（reasoning）与工具调用（工具名、参数、耗时、结果预览）。
 - **本地路径 + 远程 URL 都支持**：URL 自动浅克隆到 `~/.code-analyzer/repos/<hash>`，已克隆则复用。
 - **可配置的模型与凭据**：复用本机 pi 配置，或在网页、REPL、HTTP 请求中指定 OpenAI 兼容接口的 Base URL、API Key 和模型名。
@@ -78,8 +78,17 @@ npm start -- ./my-repo
 # 远程 URL（自动 clone）
 npm start -- https://github.com/user/repo.git
 
-# 强制开全新会话（默认恢复上次会话）
+# 直接开全新会话，跳过启动选择
 npm start -- ./my-repo --new
+
+# 查看本项目历史列表（包含可复制的会话 ID，无需模型凭据）
+npm start -- ./my-repo --list-sessions
+
+# 恢复指定历史会话
+npm start -- ./my-repo --session <会话ID>
+
+# 显式恢复最近一次会话（没有历史时新建）
+npm start -- ./my-repo --resume
 
 # 覆盖默认模型
 npm start -- ./my-repo --model deepseek/deepseek-v4-pro
@@ -99,7 +108,9 @@ npm start -- ./my-repo --no-color
 
 > 输出里 `[思考]` 开头的是模型的推理过程（暗色），`⚙ 工具名` / `✓ · 耗时 → 结果预览` 是工具调用过程；正常回答为普通文本。
 
-进入后直接提问，例如：
+在交互终端中，不指定会话参数时会先展示按更新时间排序的历史列表。输入 `0` 或直接回车新建，输入序号恢复对应历史，输入 `q` 退出。选择列表显示标题、更新时间、消息数、模型和可复制的会话 ID。在脚本或管道等非 TTY 环境中不等待选择，默认新建；可用 `--session` 明确指定历史。
+
+进入会话后直接提问，例如：
 
 - 「这个项目的整体架构是什么？」
 - 「登录鉴权的逻辑在哪，调用链怎么串的？」
@@ -112,7 +123,10 @@ npm start -- ./my-repo --no-color
 | 参数 | 作用 |
 |------|------|
 | `<路径或 URL>` | 本地 git 仓库路径，或远程 git URL |
-| `--new` | 开全新会话（默认恢复上次会话） |
+| `--new` | 直接开全新会话，跳过启动选择 |
+| `--resume` | 恢复最近一次会话；无历史时新建 |
+| `--session <ID>` | 恢复本项目指定的历史会话 |
+| `--list-sessions` | 列出本项目历史会话并退出，无需模型凭据 |
 | `--model <模型>` | 已有模型填 `provider/id`；自定义接口填服务实际接受的完整模型名 |
 | `--base-url <URL>` | 启用自定义 OpenAI Chat Completions 兼容接口 |
 | `--api-key <key>` | 自定义接口的 API Key；省略时读取 `CODE_ANALYZER_API_KEY`，`--api-key=` 表示无鉴权 |
@@ -121,6 +135,16 @@ npm start -- ./my-repo --no-color
 | `--help` | 帮助 |
 
 带值参数同时支持 `--flag value` 和 `--flag=value`。`--api-key` 必须与 `--base-url` 一起使用；已有模型的凭据继续通过环境变量或 pi 配置指定。
+
+`--new`、`--resume`、`--session`、`--list-sessions` 互斥。历史 ID 必须来自同一项目；不存在或其他项目的 ID 会报错，不会自动改为恢复最近一次。
+
+仅查询历史不会触发远程仓库 clone；未缓存且没有历史的 URL 返回空列表。
+
+### 历史会话存储
+
+历史由 pi SDK 保存在 `~/.pi/agent/sessions/<项目路径编码>/` 下的 JSONL 文件中；设置 `PI_CODING_AGENT_DIR` 时使用该目录下的 `sessions/`。停止后端或释放活动会话不会删除历史，重启后仍可列表查询和恢复。尚未生成模型回复的空会话可能尚未写入磁盘，不会出现在历史列表。
+
+恢复历史会保留原有上下文，后续问题接着该会话写入。网页同时展示已有消息；终端会打印恢复的消息数量。恢复时可以重新选择模型；自定义接口的 Base URL 和 API Key 不从历史中自动恢复，需要重新提供。
 
 ### 自定义 LLM
 
@@ -172,7 +196,8 @@ npm run serve -- --port 8787 --token my-secret-key
 |------|------|------|
 | GET | `/health` | 健康检查（免鉴权） |
 | GET | `/models` | 列出可用模型 + 默认推荐（`{models:[{provider,id,name}], default}`） |
-| POST | `/sessions` | 建会话，body `{project, resume?, modelId?, llm?, sessionId?}` → `{id, projectPath, modelLabel, resumed}` |
+| GET | `/history?project=<项目路径或URL>` | 本项目持久化历史，返回 `{projectPath, sessions:[{id,title,createdAt,updatedAt,messageCount,modelLabel?,active?}]}` |
+| POST | `/sessions` | 建会话或恢复，body `{project, historyId?, resume?, modelId?, llm?, sessionId?}` → `{id, historyId, projectPath, modelLabel, resumed, messages}` |
 | GET | `/sessions` | 列出活动会话 |
 | POST | `/sessions/:id/ask` | 提问，body `{question}`；默认 SSE 流式，`?stream=false` 返回 JSON |
 | DELETE | `/sessions/:id` | 释放会话 |
@@ -182,6 +207,10 @@ npm run serve -- --port 8787 --token my-secret-key
 
 使用已有的活动 `sessionId` 建会话会复用原会话及其模型配置；切换 LLM 时请创建新的会话。
 
+`GET /sessions` 返回当前后端进程中的活动会话，`GET /history` 返回磁盘上的持久化历史，两者 ID 用途不同。将历史条目的 `id` 作为 `POST /sessions` 的 `historyId` 即可恢复指定会话；返回的 `id` 用于后续 `/sessions/:id/ask` 和释放操作。`historyId` 与 `resume: true` 互斥。复用已有 `sessionId` 时，项目和显式指定的 `historyId` 必须与原会话一致，否则返回 409。恢复响应的 `messages` 包含当前分支的用户/助手消息，以及思考、工具和停止状态，查询与恢复本身不会调用模型生成问候或总结。
+
+历史列表的 `active` 和重复打开保护作用于当前 HTTP 后端进程；独立 REPL 或其他后端进程之间不共享占用状态。
+
 HTTP 请求头中的 Bearer Token 是 **code-analyzer 后端访问令牌**；`llm.apiKey` 是 **模型服务凭据**，两者用途不同。
 
 ### curl 示例
@@ -189,6 +218,14 @@ HTTP 请求头中的 Bearer Token 是 **code-analyzer 后端访问令牌**；`ll
 ```bash
 TOKEN=my-secret-key
 BASE=http://127.0.0.1:8787
+
+# 查询项目历史列表
+curl -G -H "Authorization: Bearer $TOKEN" \
+  --data-urlencode "project=./my-repo" "$BASE/history"
+
+# 恢复列表中的指定历史（historyId 替换为真实 ID）
+curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"project":"./my-repo","historyId":"历史列表中的ID"}' "$BASE/sessions"
 
 # 一次性提问（JSON）
 curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
@@ -243,14 +280,18 @@ cd web && npm install && npm run dev
 # 打开 http://127.0.0.1:5173
 ```
 
-页面上填写「后端地址 + Token + 项目路径」，然后选择模型配置方式：
+点击右上角「会话配置」，填写「后端地址 + Token + 项目路径」，然后选择新建会话，或从该项目的历史列表中选择要恢复的讨论。历史列表显示标题、更新时间和消息数，可手动刷新。继续选择模型配置方式：
 
 - **已配置模型**：从后端返回的模型列表中选择。
 - **自定义 OpenAI 兼容接口**：填写 LLM Base URL、模型名与 API Key。无鉴权本地服务可留空 API Key；此模式不依赖后端模型列表。
 
-点击「建会话」后即可提问。页面的后端 Token 和模型 API Key 分开填写；鉴权失败会明确显示错误。模型配置修改后需重新连接，生效的配置以新建会话为准。
+确认后配置面板自动收起，可以开始提问。恢复历史时会直接展示已有对话，继续提问会沿用之前的上下文。页面的后端 Token 和模型 API Key 分开填写；鉴权失败会明确显示错误。模型配置修改后需重新连接，生效的配置以新建或恢复会话时的选择为准。
 
-功能：流式回答（markdown 渲染）、思考过程/工具调用可折叠查看、多轮追问、新建会话、停止回答。
+功能：流式回答（Markdown 渲染）、思考过程/工具调用可折叠查看、多轮追问、按项目列出与恢复历史、新建会话、停止回答。
+
+回复中的 `mermaid` 围栏代码块会直接绘制为图表，页面隐藏源码。完整图块可在回复继续生成时显示；尚未闭合时显示生成提示，停止后未完成或语法错误时显示说明。图表按需加载并适配消息宽度，特别宽的架构图可横向滚动。
+
+非空 AI 回复在完成或停止后，下方会出现复制图标。点击后将完整 Markdown 原文复制到系统剪贴板，包含 Mermaid 源码，不包含思考和工具记录；成功会显示「已复制」。剪贴板功能需要 HTTPS 或 localhost 等浏览器允许的安全环境，权限失败时会显示重试提示。
 
 ## 架构与设计
 
@@ -261,8 +302,10 @@ code-analyzer/
 ├── src/                        # 后端（Node + TypeScript + pi SDK）
 │   ├── main.ts                 # CLI 入口
 │   ├── cli-args.ts             # CLI 参数解析与自定义模型配置
+│   ├── session-picker.ts       # 终端启动时的新建/历史会话选择
 │   ├── project-resolver.ts     # 识别本地路径 / 远程 URL，URL 自动 clone
 │   ├── session-factory.ts      # 核心：创建只读会话 + 模型/key/baseURL 解析
+│   ├── session-history.ts      # 持久化历史列表、指定会话恢复、消息转换
 │   ├── llm-config.ts           # 自定义 OpenAI 兼容配置校验
 │   ├── git-tool.ts             # 自定义只读 git 工具（白名单子命令）
 │   ├── repl.ts                 # 终端 REPL（流式 + 思考/工具可视化）
@@ -290,7 +333,7 @@ session-factory（只读会话 + 模型/凭据 + 系统提示词）
 ### 关键设计决策
 
 1. **严格只读 = 结构性保证**：通过 `tools` 白名单只启用 `read/grep/find/ls` + 自定义只读 `git` 工具，模型拿不到任何写文件 / 执行任意命令的能力，而非依赖提示词约束。
-2. **会话持久化**：用 pi SDK 的 `SessionManager` 按项目路径持久化会话，`resume` 时恢复上下文。
+2. **会话持久化**：用 pi SDK 的 `SessionManager` 按项目路径持久化会话，通过历史 ID 恢复选中会话的当前分支；保留 `resume` 恢复最近会话的兼容入口。
 3. **模型显式解析**：`ModelRuntime.create()` + `getModel` / `getAvailable` 显式选模型，默认优先 `deepseek/deepseek-v4-pro`，避免配置里失效的 `defaultModel` 导致静默失败。
 4. **配置优先级**：已有模型采用 `--model` / HTTP `modelId` > 系统环境变量 > `.env` 文件 > 全局 `~/.pi/agent`。自定义 LLM 使用会话级配置；HTTP 自定义凭据不回落到服务端凭据。
 5. **并发模型**：pi 的单会话同一时刻只允许一个 prompt，因此每个会话挂一条串行队列；不同会话之间并行。

@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import type { ModelInfo } from "../api/client";
+import type { HistorySessionInfo, ModelInfo } from "../api/client";
 import { Button } from "./Button";
 import { ChevronDownIcon, PlusIcon, RobotAvatar, XIcon } from "./Icons";
 
 export type ModelStatus = "missing-token" | "missing-url" | "loading" | "ready" | "empty" | "error";
+export type SessionMode = "new" | "history";
+export type HistoryStatus = "missing-token" | "missing-url" | "missing-project" | "loading" | "ready" | "error";
 export type ModelMode = "backend" | "custom";
 
 const modelPlaceholders: Record<ModelStatus, string> = {
@@ -19,7 +21,11 @@ export interface ConfigBarProps {
   baseUrl: string;
   token: string;
   project: string;
-  resume: boolean;
+  sessionMode: SessionMode;
+  histories: HistorySessionInfo[];
+  historyStatus: HistoryStatus;
+  historyError?: string;
+  historyId: string;
   model: string;
   models: ModelInfo[];
   modelStatus: ModelStatus;
@@ -36,7 +42,9 @@ export interface ConfigBarProps {
   onBaseUrlChange: (v: string) => void;
   onTokenChange: (v: string) => void;
   onProjectChange: (v: string) => void;
-  onResumeChange: (v: boolean) => void;
+  onSessionModeChange: (v: SessionMode) => void;
+  onHistorySelect: (id: string) => void;
+  onHistoryRefresh: () => void;
   onModelChange: (v: string) => void;
   onModelModeChange: (v: ModelMode) => void;
   onLlmBaseUrlChange: (v: string) => void;
@@ -60,6 +68,15 @@ export function ConfigBar(props: ConfigBarProps) {
     return () => dialog?.close();
   }, [expanded]);
 
+  useEffect(() => {
+    setConnectError("");
+  }, [props.baseUrl, props.token, props.project, props.sessionMode, props.historyId,
+    props.modelMode, props.model, props.llmBaseUrl, props.llmApiKey, props.llmModel]);
+
+  const openSession = (mode: SessionMode) => {
+    props.onSessionModeChange(mode);
+    setExpanded(true);
+  };
   const closeSettings = () => {
     dialogRef.current?.close();
     setExpanded(false);
@@ -111,16 +128,21 @@ export function ConfigBar(props: ConfigBarProps) {
             title={props.connected ? "已连接" : "未连接"}>
             <span aria-hidden="true" />{props.connected ? "已连接" : "未连接"}
           </span>
-          {props.connected && (
-            <button type="button" className="session-new-button" title="新建会话" disabled={props.connecting}
-              onClick={() => { props.onNewSession(); setExpanded(true); }}>
-              <PlusIcon className="h-4 w-4" />新建会话
-            </button>
-          )}
+          <button type="button" className="session-new-button" title="新建会话" aria-label="新建会话" disabled={props.connecting}
+            onClick={() => { if (props.connected) props.onNewSession(); openSession("new"); }}>
+            <PlusIcon className="h-4 w-4" />新建会话
+          </button>
+          <button type="button" className="session-new-button session-history-button" title="历史会话" aria-label="历史会话"
+            disabled={props.connecting} onClick={() => openSession("history")}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4" aria-hidden="true">
+              <path d="M3 11a9 9 0 1 1 2.7 7M3 4v7h7M12 7v5l3 2" />
+            </svg>
+            历史会话
+          </button>
           <button ref={triggerRef} type="button" className="session-config-button"
             aria-label="会话配置" aria-expanded={expanded} aria-haspopup="dialog"
             aria-controls={expanded ? "session-settings" : undefined}
-            onClick={() => setExpanded(true)}>
+            onClick={() => { if (props.sessionMode === "history") props.onHistoryRefresh(); setExpanded(true); }}>
             会话配置<ChevronDownIcon className="h-4 w-4" />
           </button>
         </div>
@@ -149,11 +171,59 @@ export function ConfigBar(props: ConfigBarProps) {
                   <input className="session-input" placeholder="项目路径 或 git URL" aria-label="项目路径 或 git URL"
                     value={props.project} onChange={(event) => props.onProjectChange(event.target.value)} />
                 </label>
-                <label className="session-resume">
-                  <input type="checkbox" checked={props.resume}
-                    onChange={(event) => props.onResumeChange(event.target.checked)} />
-                  恢复上次会话
-                </label>
+                <div className="session-model-modes session-start-modes">
+                  <label className={props.sessionMode === "new" ? "is-selected" : ""}>
+                    <input type="radio" name="session-mode" value="new" checked={props.sessionMode === "new"}
+                      onChange={() => props.onSessionModeChange("new")} />
+                    新建会话
+                  </label>
+                  <label className={props.sessionMode === "history" ? "is-selected" : ""}>
+                    <input type="radio" name="session-mode" value="history" checked={props.sessionMode === "history"}
+                      onChange={() => props.onSessionModeChange("history")} />
+                    从历史继续
+                  </label>
+                </div>
+                {props.sessionMode === "history" && (
+                  <div className="session-history">
+                    <div className="session-history-heading">
+                      <span>选择要继续的会话</span>
+                      <button type="button" className="session-history-refresh" onClick={props.onHistoryRefresh}
+                        disabled={props.connecting || ["loading", "missing-token", "missing-url", "missing-project"].includes(props.historyStatus)}>
+                        刷新列表
+                      </button>
+                    </div>
+                    {props.historyStatus === "ready" && props.histories.length > 0 ? (
+                      <div className="session-history-list" role="radiogroup" aria-label="选择历史记录">
+                        {props.histories.map((session) => (
+                          <label key={session.id} className={`session-history-item ${props.historyId === session.id ? "is-selected" : ""} ${session.active ? "is-active" : ""}`}>
+                            <input type="radio" name="history-session" value={session.id} checked={props.historyId === session.id}
+                              disabled={props.connecting || !!session.active} onChange={() => props.onHistorySelect(session.id)} />
+                            <span className="session-history-info">
+                              <span className="session-history-title">{session.title || "未命名会话"}</span>
+                              <span className="session-history-meta">
+                                <time dateTime={session.updatedAt}>{formatHistoryDate(session.updatedAt)}</time>
+                                <span>{session.messageCount} 条消息</span>
+                                {session.modelLabel && <span title={session.modelLabel}>{session.modelLabel}</span>}
+                              </span>
+                            </span>
+                            {session.active && <span className="session-history-badge">使用中</span>}
+                          </label>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className={`session-history-empty ${props.historyStatus === "error" ? "is-error" : ""}`}
+                        role={props.historyStatus === "error" ? "alert" : "status"}>
+                        {props.historyStatus === "missing-token" ? "填写下方后端 Token 后查看历史会话。"
+                          : props.historyStatus === "missing-url" ? "填写下方后端地址后查看历史会话。"
+                            : props.historyStatus === "missing-project" ? "请先填写项目路径或 Git URL。"
+                              : props.historyStatus === "loading" ? "正在加载历史会话…"
+                                : props.historyStatus === "error" ? props.historyError
+                                  : "这个项目还没有历史会话，可以先新建会话开始分析。"}
+                      </div>
+                    )}
+                    <p className="session-field-hint">使用下方模型配置继续；历史会话不会恢复 API Key。使用中的会话需要先结束当前连接。</p>
+                  </div>
+                )}
               </fieldset>
 
               <fieldset className="session-settings-section" disabled={props.connecting}>
@@ -247,9 +317,10 @@ export function ConfigBar(props: ConfigBarProps) {
 
             {connectError && <div role="alert" className="session-connect-error">{connectError}</div>}
             <div className="session-settings-footer">
-              <span>{props.connected ? "配置修改后，重新建会话生效" : "建会话成功后，面板自动收起"}</span>
-              <Button type="button" loading={props.connecting} disabled={!props.canConnect} onClick={connect}>
-                建会话
+              <span>{props.sessionMode === "history" ? (props.historyId ? "继续时会加载历史消息与上下文" : "请选择一条历史会话")
+                : props.connected ? "配置修改后，重新建会话生效" : "建会话成功后，面板自动收起"}</span>
+              <Button type="button" aria-label="连接会话" loading={props.connecting} disabled={!props.canConnect} onClick={connect}>
+                {props.sessionMode === "history" ? "继续所选会话" : "建会话"}
               </Button>
             </div>
           </div>
@@ -257,4 +328,14 @@ export function ConfigBar(props: ConfigBarProps) {
       )}
     </>
   );
+}
+
+
+function formatHistoryDate(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "更新时间未知";
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
+    ...(date.getFullYear() !== new Date().getFullYear() ? { year: "numeric" as const } : {}),
+  }).format(date);
 }

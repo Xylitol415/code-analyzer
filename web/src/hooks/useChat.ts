@@ -4,15 +4,13 @@ import { askStream, createSession, deleteSession, type ServerConfig, type Sessio
 
 const GREETING_PROMPT =
   "会话已建立。请用简短友好的中文向用户打个招呼，介绍你是只读的代码逻辑分析助手，能帮他分析项目整体架构、追踪调用链、解释某段代码逻辑、查看代码演进历史等，并邀请他开始提问。不要冗长。";
-const SUMMARY_PROMPT =
-  "欢迎回来。请用简短的中文总结我们之前讨论过的内容和主要结论，方便用户快速回顾，然后邀请他继续提问。";
 
 export interface UseChatApi {
   messages: ChatMessage[];
   sessionId: string | null;
   modelLabel: string | null;
   streaming: boolean;
-  connect: (project: string, resume: boolean, model?: SessionModel) => Promise<void>;
+  connect: (project: string, resume: boolean, model?: SessionModel, historyId?: string) => Promise<void>;
   send: (question: string) => Promise<void>;
   stop: () => void;
   newSession: () => void;
@@ -213,11 +211,11 @@ export function useChat(config: ServerConfig): UseChatApi {
   );
 
   const connect = useCallback(
-    async (project: string, resume: boolean, model?: SessionModel) => {
+    async (project: string, resume: boolean, model?: SessionModel, historyId?: string) => {
       resetSession();
       const version = connectionVersionRef.current;
       const sessionConfig = { ...config };
-      const s = await createSession(sessionConfig, project, resume, model);
+      const s = await createSession(sessionConfig, project, resume, model, historyId);
       const session = { id: s.id, config: sessionConfig };
       // A reset, newer connect, or unmount may have happened while POST was pending.
       if (connectionVersionRef.current !== version) {
@@ -227,9 +225,11 @@ export function useChat(config: ServerConfig): UseChatApi {
       sessionRef.current = session;
       setSessionId(s.id);
       setModelLabel(s.modelLabel);
-      setMessages([]);
-      // 自动触发开场（不阻塞 connect 返回）：恢复→总结，新建→打招呼
-      void runAsk(session, s.resumed ? SUMMARY_PROMPT : GREETING_PROMPT, { showUser: false });
+      setMessages(s.messages ?? []);
+      // Restoring only loads the transcript; it must not append a new model turn.
+      if (!s.resumed && !historyId) {
+        void runAsk(session, GREETING_PROMPT, { showUser: false });
+      }
     },
     [config, resetSession, runAsk],
   );

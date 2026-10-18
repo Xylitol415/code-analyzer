@@ -9,6 +9,7 @@ import {
 import { createGitReadonlyTool } from "./git-tool.js";
 import { getEnvConfig } from "./config.js";
 import { parseModelOptions, type SessionModelOptions } from "./llm-config.js";
+import { listProjectHistory, openHistorySession, validateHistorySelection } from "./session-history.js";
 
 /** 追加到默认系统提示词末尾的「代码逻辑分析」角色说明。 */
 const ANALYZER_INSTRUCTIONS = `## 角色：只读代码逻辑分析助手
@@ -33,6 +34,8 @@ const ANALYZER_INSTRUCTIONS = `## 角色：只读代码逻辑分析助手
 export interface ReadOnlySessionOptions extends SessionModelOptions {
   /** 是否恢复该项目上一次的会话（默认新建）。 */
   resume: boolean;
+  /** 恢复该项目内指定的持久会话 ID，与 resume 互斥。 */
+  historyId?: string;
   /** 使用内存会话（不落盘），用于一次性提问。默认 false。 */
   inMemory?: boolean;
 }
@@ -54,6 +57,15 @@ export async function createReadOnlySession(
   options: ReadOnlySessionOptions,
 ): Promise<ReadOnlySessionResult> {
   const selection = parseModelOptions(options);
+  validateHistorySelection(options);
+  const historyId = options.historyId ?? (options.resume && !options.inMemory
+    ? (await listProjectHistory(projectPath))[0]?.id
+    : undefined);
+  const sessionManager = options.inMemory
+    ? SessionManager.inMemory(projectPath)
+    : historyId
+      ? await openHistorySession(projectPath, historyId)
+      : SessionManager.create(projectPath);
   const agentDir = getAgentDir();
   const env = getEnvConfig();
 
@@ -104,12 +116,6 @@ export async function createReadOnlySession(
     appendSystemPromptOverride: (base) => [...base, ANALYZER_INSTRUCTIONS],
   });
   await resourceLoader.reload();
-
-  const sessionManager = options.inMemory
-    ? SessionManager.inMemory(projectPath)
-    : options.resume
-      ? SessionManager.continueRecent(projectPath)
-      : SessionManager.create(projectPath);
 
   const { session } = await createAgentSession({
     cwd: projectPath,

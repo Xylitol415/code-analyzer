@@ -4,6 +4,9 @@ import type { CustomLlmConfig } from "./llm-config.js";
 export interface CliArgs {
   target?: string;
   resume: boolean;
+  newSession: boolean;
+  listSessions: boolean;
+  historyId?: string;
   modelId?: string;
   llm?: CustomLlmConfig;
   help: boolean;
@@ -12,20 +15,28 @@ export interface CliArgs {
 }
 
 export function parseArgs(argv: string[], env: EnvConfig = {}): CliArgs {
-  const out: CliArgs = { resume: true, help: false, noThinking: false, noColor: false };
+  const out: CliArgs = { resume: false, newSession: false, listSessions: false, help: false, noThinking: false, noColor: false };
   let baseUrl: string | undefined;
   let apiKey: string | undefined;
+  const sessionModes: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--help" || a === "-h") {
       out.help = true;
     } else if (a === "--new") {
-      out.resume = false;
+      out.newSession = true;
+      sessionModes.push(a);
+    } else if (a === "--resume") {
+      out.resume = true;
+      sessionModes.push(a);
+    } else if (a === "--list-sessions") {
+      out.listSessions = true;
+      sessionModes.push(a);
     } else if (a === "--no-thinking") {
       out.noThinking = true;
     } else if (a === "--no-color") {
       out.noColor = true;
-    } else if (["--model", "--base-url", "--api-key"].includes(a.split("=", 1)[0])) {
+    } else if (["--model", "--base-url", "--api-key", "--session"].includes(a.split("=", 1)[0])) {
       const equals = a.indexOf("=");
       const flag = equals >= 0 ? a.slice(0, equals) : a;
       const value = equals >= 0 ? a.slice(equals + 1) : argv[++i];
@@ -39,6 +50,10 @@ export function parseArgs(argv: string[], env: EnvConfig = {}): CliArgs {
       if (flag === "--model") out.modelId = value.trim();
       if (flag === "--base-url") baseUrl = value.trim();
       if (flag === "--api-key") apiKey = value;
+      if (flag === "--session") {
+        out.historyId = value.trim();
+        sessionModes.push(flag);
+      }
     } else if (a.startsWith("-")) {
       // 不回显未知参数；参数中可能包含误填的凭据。
       throw new Error("存在未知参数，请使用 --help 查看支持的选项");
@@ -47,6 +62,10 @@ export function parseArgs(argv: string[], env: EnvConfig = {}): CliArgs {
     } else {
       throw new Error("只能指定一个项目路径或 URL");
     }
+  }
+
+  if (sessionModes.length > 1) {
+    throw new Error("--new、--resume、--session 与 --list-sessions 不能同时使用，请选择一种会话模式");
   }
 
   if (baseUrl !== undefined) {

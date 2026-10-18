@@ -13,7 +13,7 @@ function deferred() {
   return { promise, resolve };
 }
 
-async function setup(t) {
+async function setup(t, sessionResponse = {}) {
   const sessions = new Set();
   const requests = [];
   const streams = [];
@@ -27,7 +27,7 @@ async function setup(t) {
       return Response.json({ ok: sessions.delete(id) });
     }
     if (url.endsWith("/sessions")) {
-      const info = { id: `session-${++nextId}`, projectPath: "/project", modelLabel: "Test model", resumed: false };
+      const info = { id: `session-${++nextId}`, projectPath: "/project", modelLabel: "Test model", resumed: false, ...sessionResponse };
       sessions.add(info.id);
       if (delayCreates) {
         const response = deferred();
@@ -126,7 +126,7 @@ test("reconnecting releases the previous session", async (t) => {
 });
 
 test("a late session response after reset is released and cannot reconnect the UI", async (t) => {
-  const h = await setup(t);
+  const h = await setup(t, { resumed: true, messages: [{ id: "old", role: "user", content: "old conversation", thinking: "", tools: [], streaming: false }] });
   h.delayCreates();
   let connecting;
   await act(async () => { connecting = h.chat.connect("/project", false); });
@@ -134,7 +134,28 @@ test("a late session response after reset is released and cannot reconnect the U
   await act(async () => { h.pendingCreates[0].finish(); await connecting; });
   assert.equal(h.sessions.size, 0);
   assert.equal(h.chat.sessionId, null);
+  assert.deepEqual(h.chat.messages, []);
   assert.equal(h.streams.length, 0);
+});
+
+test("restoring a selected history displays its transcript without requesting a greeting or summary", async (t) => {
+  const transcript = [
+    { id: "saved-user", role: "user", content: "Explain the queue", thinking: "", tools: [], streaming: false },
+    { id: "saved-assistant", role: "assistant", content: "The queue is serial", thinking: "Read the implementation", tools: [{ name: "read", isError: false }], stopped: true, streaming: false },
+  ];
+  const h = await setup(t, { resumed: true, historyId: "saved-history", messages: transcript });
+  await act(async () => { await h.chat.connect("/project", false, "provider/model", "saved-history"); });
+  const request = h.requests.find((request) => request.url.endsWith("/sessions") && request.method === "POST");
+  assert.equal(JSON.parse(request.body).historyId, "saved-history");
+  assert.deepEqual(h.chat.messages, transcript);
+  assert.equal(h.chat.streaming, false);
+  assert.equal(h.streams.length, 0);
+  let question;
+  await act(async () => { question = h.chat.send("Continue explaining"); });
+  await h.finish(0, "The next detail");
+  await question;
+  assert.deepEqual(h.chat.messages.slice(0, 2), transcript);
+  assert.equal(h.chat.messages.at(-1).content, "The next detail");
 });
 
 test("only the latest overlapping connection can become active", async (t) => {
