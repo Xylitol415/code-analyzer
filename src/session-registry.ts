@@ -3,6 +3,7 @@ import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { createReadOnlySession } from "./session-factory.js";
 import { resolveProject } from "./project-resolver.js";
 import { SessionQueue } from "./session-queue.js";
+import { parseModelOptions, type SessionModelOptions } from "./llm-config.js";
 
 export interface SessionEntry {
   id: string;
@@ -15,13 +16,12 @@ export interface SessionEntry {
 
 const registry = new Map<string, SessionEntry>();
 
-export interface OpenSessionOptions {
+export interface OpenSessionOptions extends SessionModelOptions {
   project: string;
   /** 显式指定会话 id（缺省自动生成 UUID）。 */
   sessionId?: string;
   /** 是否恢复该项目上一次的会话。默认 false（全新）。 */
   resume?: boolean;
-  modelId?: string;
 }
 
 export interface OpenSessionResult {
@@ -33,6 +33,7 @@ export interface OpenSessionResult {
 }
 
 export async function openSession(opts: OpenSessionOptions): Promise<OpenSessionResult> {
+  const modelOptions = parseModelOptions(opts);
   const resolved = resolveProject(opts.project);
 
   // 幂等：已存在的 id 直接返回，便于客户端重试建会话
@@ -46,7 +47,7 @@ export async function openSession(opts: OpenSessionOptions): Promise<OpenSession
   const id = opts.sessionId ?? randomUUID();
   const { session, modelLabel } = await createReadOnlySession(resolved.cwd, {
     resume: opts.resume ?? false,
-    modelId: opts.modelId,
+    ...modelOptions,
   });
 
   // resume 且恢复到了含历史用户消息的会话，才算真正的「恢复」

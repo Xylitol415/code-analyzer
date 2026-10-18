@@ -3,6 +3,27 @@ import { test } from "node:test";
 import { runAsk } from "../src/ask.ts";
 import { SessionQueue } from "../src/session-queue.ts";
 
+test("a provider failure is reported instead of resolving as an empty answer", async () => {
+  let listener;
+  let unsubscribed = false;
+  const session = {
+    subscribe(callback) {
+      listener = callback;
+      return () => { unsubscribed = true; };
+    },
+    async prompt() {
+      // The SDK resolves prompt() after an assistant error terminal event.
+      listener({ type: "message_end", message: {
+        role: "assistant", content: [], stopReason: "error", errorMessage: "401 Invalid API key",
+        api: "openai-completions", provider: "custom-openai", model: "custom-model", timestamp: 1,
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      } });
+    },
+  };
+  await assert.rejects(runAsk(session, "question"), /模型服务.*401 Invalid API key/);
+  assert.equal(unsubscribed, true);
+});
+
 test("cancellation during prompt preparation prevents a model request from starting", async () => {
   const controller = new AbortController();
   let modelStarted = false;

@@ -34,7 +34,7 @@ export function MessageInput(props: MessageInputProps) {
           rows={1}
           value={value}
           placeholder={
-            props.disabled ? "请先在上方填写配置并「建会话」" : "输入问题，Enter 发送，Shift+Enter 换行"
+            props.disabled ? "打开右上角「会话配置」并建会话" : "输入问题，Enter 发送，Shift+Enter 换行"
           }
           className="max-h-44 flex-1 resize-none overflow-y-auto rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm leading-relaxed text-slate-900 placeholder:text-slate-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/40 focus:outline-none"
           onChange={(e) => {

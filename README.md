@@ -59,7 +59,7 @@ cd web && npm install && npm run dev                 # 终端 2：前端，打�
 - **交互式多轮问答**：流式输出，可无限追问；会话按项目路径持久化，下次进入同一项目自动恢复上下文。
 - **过程可视化**：实时展示模型的思考过程（reasoning）与工具调用（工具名、参数、耗时、结果预览）。
 - **本地路径 + 远程 URL 都支持**：URL 自动浅克隆到 `~/.code-analyzer/repos/<hash>`，已克隆则复用。
-- **可配置的模型与凭据**：通过 `.env` / 环境变量覆盖 API key、模型、base URL，或复用本机 pi 配置。
+- **可配置的模型与凭据**：复用本机 pi 配置，或在网页、REPL、HTTP 请求中指定 OpenAI 兼容接口的 Base URL、API Key 和模型名。
 
 **三种使用形态**
 
@@ -84,6 +84,12 @@ npm start -- ./my-repo --new
 # 覆盖默认模型
 npm start -- ./my-repo --model deepseek/deepseek-v4-pro
 
+# 自定义 OpenAI 兼容接口（key 从 CODE_ANALYZER_API_KEY / .env 读取）
+npm start -- ./my-repo --base-url https://gateway.example.com/v1 --model organization/model-name
+
+# 无鉴权本地接口；显式空 key 可覆盖环境变量中的 key
+npm start -- ./my-repo --base-url http://127.0.0.1:11434/v1 --model qwen3 --api-key=
+
 # 隐藏思考过程（reasoning 可能较长）
 npm start -- ./my-repo --no-thinking
 
@@ -107,10 +113,24 @@ npm start -- ./my-repo --no-color
 |------|------|
 | `<路径或 URL>` | 本地 git 仓库路径，或远程 git URL |
 | `--new` | 开全新会话（默认恢复上次会话） |
-| `--model provider/id` | 指定模型 |
+| `--model <模型>` | 已有模型填 `provider/id`；自定义接口填服务实际接受的完整模型名 |
+| `--base-url <URL>` | 启用自定义 OpenAI Chat Completions 兼容接口 |
+| `--api-key <key>` | 自定义接口的 API Key；省略时读取 `CODE_ANALYZER_API_KEY`，`--api-key=` 表示无鉴权 |
 | `--no-thinking` | 隐藏思考过程 |
 | `--no-color` | 关闭彩色输出 |
 | `--help` | 帮助 |
+
+带值参数同时支持 `--flag value` 和 `--flag=value`。`--api-key` 必须与 `--base-url` 一起使用；已有模型的凭据继续通过环境变量或 pi 配置指定。
+
+### 自定义 LLM
+
+自定义模式使用 **OpenAI Chat Completions** 协议，Base URL 填 API 根路径（通常以 `/v1` 结尾），不要填写 `/chat/completions` 完整端点。模型名会原样发送，包含 `/` 时也不会拆成 provider。模型和网关需要支持工具调用，才能读取文件和分析仓库。
+
+REPL 仅在显式提供 `--base-url` 时进入自定义模式：模型名按 `--model` > `CODE_ANALYZER_MODEL` 选择，API Key 按 `--api-key` > `CODE_ANALYZER_API_KEY` 选择。若两处都没有 key，则适用于无鉴权本地服务。通过环境变量提供 key 可以避免将 key 写入命令行。
+
+自定义配置只用于当前会话；修改 Base URL、API Key 或模型后需重新建立会话。
+
+API Key 不写入 pi 凭据文件或浏览器存储；恢复历史时需重新提供自定义配置。空 key 使用固定的 `not-required` 占位值满足 SDK 请求要求，不读取服务器凭据。自定义模型目前采用文本与工具调用模式，按 32K 上下文、最多 4096 输出 token 配置；不自动识别模型能力。
 
 ## 配置（API Key 与模型）
 
@@ -119,10 +139,10 @@ npm start -- ./my-repo --no-color
 | 环境变量 | 作用 | 示例 |
 |----------|------|------|
 | `CODE_ANALYZER_API_KEY` | API key（应用于所选模型的 provider） | `sk-...` |
-| `CODE_ANALYZER_MODEL` | 模型选择（`provider/modelId` 或 `modelId`） | `deepseek/deepseek-v4-pro` |
-| `CODE_ANALYZER_BASE_URL` | （可选）覆盖 API base URL | `https://api.deepseek.com` |
+| `CODE_ANALYZER_MODEL` | 已有模型的 `provider/modelId` 或 `modelId`；CLI 指定 `--base-url` 时用作完整模型名 | `deepseek/deepseek-v4-pro` |
+| `CODE_ANALYZER_BASE_URL` | （可选）覆盖已有模型 provider 的 API base URL，不启用自定义模式 | `https://api.deepseek.com` |
 
-优先级：**命令行 `--model` / HTTP `modelId` > 系统环境变量 > `.env` 文件 > 全局 `~/.pi/agent` 配置**。
+已有模型模式的优先级：**命令行 `--model` / HTTP `modelId` > 系统环境变量 > `.env` 文件 > 全局 `~/.pi/agent` 配置**。CLI `--base-url` 与 HTTP `llm` 对象会使用各自明确指定的自定义配置；HTTP `llm` 的 key 省略或为空时，不会回落到服务端环境变量或 pi 凭据。
 
 ```bash
 # 方式一：.env 文件（推荐）
@@ -152,11 +172,17 @@ npm run serve -- --port 8787 --token my-secret-key
 |------|------|------|
 | GET | `/health` | 健康检查（免鉴权） |
 | GET | `/models` | 列出可用模型 + 默认推荐（`{models:[{provider,id,name}], default}`） |
-| POST | `/sessions` | 建会话，body `{project, resume?, modelId?, sessionId?}` → `{id, projectPath, modelLabel, resumed}` |
+| POST | `/sessions` | 建会话，body `{project, resume?, modelId?, llm?, sessionId?}` → `{id, projectPath, modelLabel, resumed}` |
 | GET | `/sessions` | 列出活动会话 |
 | POST | `/sessions/:id/ask` | 提问，body `{question}`；默认 SSE 流式，`?stream=false` 返回 JSON |
 | DELETE | `/sessions/:id` | 释放会话 |
-| POST | `/ask` | 一次性提问，body `{project, question, modelId?}`；默认 JSON，`?stream=true` 流式 |
+| POST | `/ask` | 一次性提问，body `{project, question, modelId?, llm?}`；默认 JSON，`?stream=true` 流式 |
+
+`llm` 格式为 `{baseUrl: string, model: string, apiKey?: string}`，与 `modelId` 互斥。`baseUrl` 与 `model` 必填；`apiKey` 省略或空字符串表示无鉴权，不使用服务器已有凭据。`/models` 只返回服务器已配置的模型；自定义模型不需要出现在该列表中。
+
+使用已有的活动 `sessionId` 建会话会复用原会话及其模型配置；切换 LLM 时请创建新的会话。
+
+HTTP 请求头中的 Bearer Token 是 **code-analyzer 后端访问令牌**；`llm.apiKey` 是 **模型服务凭据**，两者用途不同。
 
 ### curl 示例
 
@@ -171,6 +197,11 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/jso
 # 建会话（多轮）
 SID=$(curl -s -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"project":"./my-repo"}' "$BASE/sessions" | jq -r .id)
+
+# 使用自定义本地 LLM 建会话（无鉴权示例）
+curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"project":"./my-repo","llm":{"baseUrl":"http://127.0.0.1:11434/v1","model":"qwen3"}}' \
+  "$BASE/sessions"
 
 # 会话内提问（SSE 流式）
 curl -N -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
@@ -212,7 +243,12 @@ cd web && npm install && npm run dev
 # 打开 http://127.0.0.1:5173
 ```
 
-页面上填写「后端地址 + Token + 项目路径」→ 点「建会话」→ 即可在聊天框提问。
+页面上填写「后端地址 + Token + 项目路径」，然后选择模型配置方式：
+
+- **已配置模型**：从后端返回的模型列表中选择。
+- **自定义 OpenAI 兼容接口**：填写 LLM Base URL、模型名与 API Key。无鉴权本地服务可留空 API Key；此模式不依赖后端模型列表。
+
+点击「建会话」后即可提问。页面的后端 Token 和模型 API Key 分开填写；鉴权失败会明确显示错误。模型配置修改后需重新连接，生效的配置以新建会话为准。
 
 功能：流式回答（markdown 渲染）、思考过程/工具调用可折叠查看、多轮追问、新建会话、停止回答。
 
@@ -223,9 +259,11 @@ cd web && npm install && npm run dev
 ```
 code-analyzer/
 ├── src/                        # 后端（Node + TypeScript + pi SDK）
-│   ├── main.ts                 # CLI 入口（参数解析）
+│   ├── main.ts                 # CLI 入口
+│   ├── cli-args.ts             # CLI 参数解析与自定义模型配置
 │   ├── project-resolver.ts     # 识别本地路径 / 远程 URL，URL 自动 clone
 │   ├── session-factory.ts      # 核心：创建只读会话 + 模型/key/baseURL 解析
+│   ├── llm-config.ts           # 自定义 OpenAI 兼容配置校验
 │   ├── git-tool.ts             # 自定义只读 git 工具（白名单子命令）
 │   ├── repl.ts                 # 终端 REPL（流式 + 思考/工具可视化）
 │   ├── server.ts               # HTTP 服务（Hono，SSE + JSON，Bearer 鉴权）
@@ -254,7 +292,7 @@ session-factory（只读会话 + 模型/凭据 + 系统提示词）
 1. **严格只读 = 结构性保证**：通过 `tools` 白名单只启用 `read/grep/find/ls` + 自定义只读 `git` 工具，模型拿不到任何写文件 / 执行任意命令的能力，而非依赖提示词约束。
 2. **会话持久化**：用 pi SDK 的 `SessionManager` 按项目路径持久化会话，`resume` 时恢复上下文。
 3. **模型显式解析**：`ModelRuntime.create()` + `getModel` / `getAvailable` 显式选模型，默认优先 `deepseek/deepseek-v4-pro`，避免配置里失效的 `defaultModel` 导致静默失败。
-4. **配置优先级**：`--model` / HTTP `modelId` > 系统环境变量 > `.env` 文件 > 全局 `~/.pi/agent`。
+4. **配置优先级**：已有模型采用 `--model` / HTTP `modelId` > 系统环境变量 > `.env` 文件 > 全局 `~/.pi/agent`。自定义 LLM 使用会话级配置；HTTP 自定义凭据不回落到服务端凭据。
 5. **并发模型**：pi 的单会话同一时刻只允许一个 prompt，因此每个会话挂一条串行队列；不同会话之间并行。
 6. **SSE 事件协议**：后端把 SDK 的底层事件映射为 `thinking / tool / text / done / error` 五类 SSE 事件，前端逐帧消费，实现近实时流式。
 7. **安全**：`.env` 已被 `.gitignore` 忽略，凭据不落库；HTTP 服务默认绑 `127.0.0.1` + Bearer token 鉴权。

@@ -13,6 +13,15 @@ export interface SessionInfo {
   resumed: boolean;
 }
 
+export interface LlmConfig {
+  baseUrl: string;
+  apiKey?: string;
+  model: string;
+}
+
+// Keep the existing model ID argument while making custom configuration exclusive.
+export type SessionModel = string | { llm: LlmConfig };
+
 export interface ModelInfo {
   provider: string;
   id: string;
@@ -31,22 +40,30 @@ function authHeaders(config: ServerConfig): Record<string, string> {
   };
 }
 
+async function responseError(response: Response): Promise<Error> {
+  if (response.status === 401) {
+    return new Error("后端鉴权失败（401）：请核对后端地址，并填写该服务启动时的 Token（--token 参数或启动日志）。后端 Token 与 LLM API Key 是不同凭据。");
+  }
+  const body = (await response.json().catch(() => ({}))) as { error?: string };
+  return new Error(body.error ?? `HTTP ${response.status}`);
+}
+
 export async function createSession(
   config: ServerConfig,
   project: string,
   resume = false,
-  modelId?: string,
+  model?: SessionModel,
 ): Promise<SessionInfo> {
   const body: Record<string, unknown> = { project, resume };
-  if (modelId) body.modelId = modelId;
+  if (typeof model === "string" && model) body.modelId = model;
+  else if (model && typeof model === "object") body.llm = model.llm;
   const res = await fetch(`${config.baseUrl}/sessions`, {
     method: "POST",
     headers: authHeaders(config),
     body: JSON.stringify(body),
   });
   if (!res.ok) {
-    const body = (await res.json().catch(() => ({}))) as { error?: string };
-    throw new Error(body.error ?? `HTTP ${res.status}`);
+    throw await responseError(res);
   }
   return res.json();
 }
@@ -59,8 +76,7 @@ export async function deleteSession(config: ServerConfig, sessionId: string): Pr
   });
   // Releasing a session is idempotent, including after a server restart.
   if (!res.ok && res.status !== 404) {
-    const body = (await res.json().catch(() => ({}))) as { error?: string };
-    throw new Error(body.error ?? `HTTP ${res.status}`);
+    throw await responseError(res);
   }
 }
 
@@ -69,8 +85,7 @@ export async function listModels(config: ServerConfig): Promise<ModelList> {
     headers: authHeaders(config),
   });
   if (!res.ok) {
-    const body = (await res.json().catch(() => ({}))) as { error?: string };
-    throw new Error(body.error ?? `HTTP ${res.status}`);
+    throw await responseError(res);
   }
   return res.json();
 }
@@ -95,12 +110,7 @@ export function askStream(
     async onopen(response) {
       const ct = response.headers.get("content-type") ?? "";
       if (response.ok && ct.includes("text/event-stream")) return;
-      let msg = `HTTP ${response.status}`;
-      if (!response.ok) {
-        const body = (await response.json().catch(() => ({}))) as { error?: string };
-        if (body.error) msg = body.error;
-      }
-      throw new Error(msg);
+      throw await responseError(response);
     },
     onmessage(ev) {
       const data = ev.data ? (JSON.parse(ev.data) as unknown) : {};

@@ -1,40 +1,9 @@
 import { createReadOnlySession } from "./session-factory.js";
 import { resolveProject } from "./project-resolver.js";
 import { startRepl } from "./repl.js";
-
-interface CliArgs {
-  target?: string;
-  resume: boolean;
-  modelId?: string;
-  help: boolean;
-  noThinking: boolean;
-  noColor: boolean;
-}
-
-function parseArgs(argv: string[]): CliArgs {
-  const out: CliArgs = { resume: true, help: false, noThinking: false, noColor: false };
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a === "--help" || a === "-h") {
-      out.help = true;
-    } else if (a === "--new") {
-      out.resume = false;
-    } else if (a === "--no-thinking") {
-      out.noThinking = true;
-    } else if (a === "--no-color") {
-      out.noColor = true;
-    } else if (a === "--model") {
-      out.modelId = argv[++i];
-    } else if (a.startsWith("--model=")) {
-      out.modelId = a.slice("--model=".length);
-    } else if (a.startsWith("--")) {
-      // 忽略未知开关
-    } else if (!out.target) {
-      out.target = a;
-    }
-  }
-  return out;
-}
+import { parseArgs } from "./cli-args.js";
+import { getEnvConfig } from "./config.js";
+import { parseModelOptions } from "./llm-config.js";
 
 function printHelp(): void {
   console.log(`
@@ -42,11 +11,14 @@ code-analyzer —— 只读的代码逻辑分析助手（基于 pi SDK）
 
 用法:
   npm start -- <项目路径|git URL> [--new] [--model provider/modelId]
+  npm start -- <项目路径|git URL> --base-url <URL> --model <模型名> [--api-key <key>]
 
 参数:
   <路径或 URL>   本地 git 仓库路径，或远程 git URL（自动 clone 到缓存目录）
   --new          强制开启全新会话（默认恢复该项目上一次的会话）
-  --model        覆盖默认模型，例如 --model deepseek/deepseek-v4-pro
+  --model        已有模型的 provider/id，或自定义接口的完整模型名
+  --base-url     使用自定义 OpenAI Chat Completions 兼容接口（API 根路径，通常以 /v1 结尾）
+  --api-key      自定义接口凭据；默认读取 CODE_ANALYZER_API_KEY，--api-key= 表示无鉴权
   --no-thinking  隐藏模型的思考过程（reasoning）
   --no-color     关闭彩色输出
   --help         显示本帮助
@@ -55,11 +27,12 @@ code-analyzer —— 只读的代码逻辑分析助手（基于 pi SDK）
   npm start -- ./my-repo
   npm start -- https://github.com/user/repo.git
   npm start -- ./my-repo --new
+  npm start -- ./my-repo --base-url http://127.0.0.1:11434/v1 --model qwen3 --api-key=
 `);
 }
 
 async function main(): Promise<void> {
-  const args = parseArgs(process.argv.slice(2));
+  const args = parseArgs(process.argv.slice(2), getEnvConfig());
 
   if (args.help) {
     printHelp();
@@ -70,6 +43,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  const modelOptions = parseModelOptions(args);
   let resolved;
   try {
     resolved = resolveProject(args.target);
@@ -86,7 +60,7 @@ async function main(): Promise<void> {
 
   const { session, modelLabel } = await createReadOnlySession(resolved.cwd, {
     resume: args.resume,
-    modelId: args.modelId,
+    ...modelOptions,
   });
 
   console.log(`模型: ${modelLabel}`);

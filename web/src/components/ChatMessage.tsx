@@ -1,6 +1,6 @@
 import type { ChatMessage as Msg, ToolCall } from "../types";
 import { Markdown } from "./Markdown";
-import { ChevronDownIcon, RobotAvatar, UserAvatar } from "./Icons";
+import { ChevronDownIcon, RobotAvatar, StopIcon, UserAvatar } from "./Icons";
 import { Spinner } from "./Spinner";
 
 export function ChatMessage({ message }: { message: Msg }) {
@@ -17,6 +17,7 @@ export function ChatMessage({ message }: { message: Msg }) {
 
   const hasThinking = message.thinking.length > 0;
   const hasTools = message.tools.length > 0;
+  const hasContent = message.content.trim().length > 0;
 
   return (
     <div className="flex gap-3 px-4 py-3">
@@ -43,7 +44,7 @@ export function ChatMessage({ message }: { message: Msg }) {
                 </summary>
                 <div className="mt-1.5 space-y-1">
                   {message.tools.map((t, i) => (
-                    <ToolRow key={i} tool={t} />
+                    <ToolRow key={i} tool={t} stopped={!!message.stopped} />
                   ))}
                 </div>
               </details>
@@ -51,14 +52,27 @@ export function ChatMessage({ message }: { message: Msg }) {
           </div>
         )}
 
-        {message.content ? (
+        {hasContent ? (
           <div className="markdown-body">
             <Markdown>{message.content}</Markdown>
           </div>
-        ) : message.streaming ? (
+        ) : message.streaming && !message.stopped ? (
           <div className="flex items-center gap-2 py-2 text-sm text-slate-400">
             <Spinner className="h-4 w-4" /> 正在思考…
           </div>
+        ) : null}
+
+        {message.stopped ? (
+          <div role="status" className="mt-2 rounded-lg border border-slate-200 bg-slate-100/70 px-3 py-2.5 text-xs text-slate-500">
+            <span className="inline-flex items-center gap-1.5 font-medium">
+              <StopIcon className="h-3.5 w-3.5" />已停止回复
+            </span>
+            {!hasContent && !message.error && (
+              <div className="mt-1 text-slate-500">尚未生成回复内容，你可以重新提问。</div>
+            )}
+          </div>
+        ) : !message.streaming && !hasContent && !message.error ? (
+          <div role="status" className="py-2 text-sm text-slate-500">本次未返回回复内容，请重试。</div>
         ) : null}
 
         {message.error && <div className="mt-2 text-sm text-red-500">错误：{message.error}</div>}
@@ -67,10 +81,14 @@ export function ChatMessage({ message }: { message: Msg }) {
   );
 }
 
-function ToolRow({ tool }: { tool: ToolCall }) {
+function ToolRow({ tool, stopped }: { tool: ToolCall; stopped: boolean }) {
   return (
     <div className="flex items-center gap-2 text-xs text-slate-600">
-      {tool.isError === undefined ? (
+      {tool.isError === undefined && stopped ? (
+        <span title="已停止等待工具结果" aria-label="已停止等待工具结果" className="inline-flex text-slate-400">
+          <StopIcon className="h-3 w-3" />
+        </span>
+      ) : tool.isError === undefined ? (
         <Spinner className="h-3 w-3" />
       ) : tool.isError ? (
         <span className="text-red-500">✗</span>
