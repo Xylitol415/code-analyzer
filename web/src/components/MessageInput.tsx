@@ -28,7 +28,7 @@ export function MessageInput(props: MessageInputProps) {
 
   return (
     <div className="border-t border-slate-200 bg-white px-4 py-3">
-      <div className="mx-auto flex max-w-3xl items-end gap-2">
+      <div className="mx-auto flex max-w-5xl items-end gap-2">
         <textarea
           ref={ref}
           rows={1}

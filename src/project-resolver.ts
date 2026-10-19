@@ -19,6 +19,16 @@ export function isGitUrl(input: string): boolean {
   return /^(https?|git|ssh):\/\//i.test(input) || /^git@[\w.-]+:.+/.test(input);
 }
 
+function cachedProjectPath(input: string): string {
+  const hash = createHash("sha256").update(input).digest("hex").slice(0, 12);
+  return join(CACHE_DIR, hash);
+}
+
+/** Reading history never clones a remote repository. An uncached URL has no history. */
+export function resolveProjectForHistory(input: string): string {
+  return isGitUrl(input) ? cachedProjectPath(input) : resolveProject(input).cwd;
+}
+
 /**
  * 识别输入是远程 URL 还是本地路径。
  * - URL：clone（浅克隆）到 `~/.code-analyzer/repos/<hash>`，已存在则复用。
@@ -26,8 +36,7 @@ export function isGitUrl(input: string): boolean {
  */
 export function resolveProject(input: string): ResolvedProject {
   if (isGitUrl(input)) {
-    const hash = createHash("sha256").update(input).digest("hex").slice(0, 12);
-    const dir = join(CACHE_DIR, hash);
+    const dir = cachedProjectPath(input);
 
     if (existsSync(join(dir, ".git"))) {
       return { cwd: dir, source: input, cloned: false };

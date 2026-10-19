@@ -4,20 +4,23 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { streamSSE, type SSEStreamingApi } from "hono/streaming";
 import { serve } from "@hono/node-server";
-import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { createReadOnlySession } from "./session-factory.js";
-import { resolveProject } from "./project-resolver.js";
+import { resolveProject, resolveProjectForHistory } from "./project-resolver.js";
 import {
   closeSession,
   getSession,
+  getHistoryActiveSessionId,
+  isHistoryActive,
   listSessions,
   openSession,
   runOnSession,
 } from "./session-registry.js";
 import { listModels } from "./models.js";
-import { runAsk } from "./ask.js";
+import { runAsk, type AskEvent } from "./ask.js";
+import { createSkillRoutes } from "./skill-routes.js";
 import { SessionQueue } from "./session-queue.js";
 import { LlmConfigError, parseModelOptions } from "./llm-config.js";
+import { HistoryError, listProjectHistory, validateHistorySelection } from "./session-history.js";
 
 // ---------------- 参数解析 ----------------
 interface ServerArgs {
@@ -65,7 +68,9 @@ function makeSseWriter(stream: SSEStreamingApi) {
 }
 
 function sseHandler(write: (e: string, d: unknown) => Promise<void>) {
-  return (e: AgentSessionEvent) => {
+  return (e: AskEvent) => {
+    if (e.type === "skill_preview") { void write("skill_preview", e.preview); return; }
+    if (e.type === "skills_applied") { void write("skills_applied", e.snapshot); return; }
     if (e.type === "message_update") {
       const ev = e.assistantMessageEvent;
       if (ev.type === "text_delta") void write("text", { delta: ev.delta });
@@ -99,6 +104,7 @@ export function createApp(token: string) {
   });
 
   app.get("/health", (c) => c.json({ status: "ok" }));
+  app.route("/skills", createSkillRoutes());
 
   // 列出可用模型（需鉴权）
   app.get("/models", async (c) => {
@@ -109,15 +115,37 @@ export function createApp(token: string) {
     }
   });
 
+  app.get("/history", async (c) => {
+    const project = c.req.query("project")?.trim();
+    if (!project) return c.json({ error: "missing 'project'" }, 400);
+    let projectPath: string;
+    try {
+      projectPath = resolveProjectForHistory(project);
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+    }
+    try {
+      const sessions = (await listProjectHistory(projectPath)).map((session) => ({
+        ...session, active: isHistoryActive(projectPath, session.id),
+        activeSessionId: getHistoryActiveSessionId(projectPath, session.id),
+      }));
+      return c.json({ projectPath, sessions });
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
+    }
+  });
+
   // 建/恢复会话
   app.post("/sessions", async (c) => {
-    let body: { project?: string; sessionId?: string; resume?: boolean; modelId?: string };
+    let body: { project?: string; sessionId?: string; resume?: boolean; modelId?: string; historyId?: string };
     let modelOptions: ReturnType<typeof parseModelOptions>;
     try {
       body = await c.req.json();
       modelOptions = parseModelOptions(body);
+      validateHistorySelection(body);
+      if (body.resume !== undefined && typeof body.resume !== "boolean") return c.json({ error: "resume must be boolean" }, 400);
     } catch (e) {
-      if (e instanceof LlmConfigError) return c.json({ error: e.message }, 400);
+      if (e instanceof LlmConfigError || e instanceof HistoryError) return c.json({ error: e.message }, 400);
       return c.json({ error: "invalid json body" }, 400);
     }
     if (typeof body.project !== "string" || !body.project.trim()) return c.json({ error: "missing 'project'" }, 400);
@@ -126,10 +154,12 @@ export function createApp(token: string) {
         project: body.project,
         sessionId: body.sessionId,
         resume: body.resume,
+        historyId: body.historyId,
         ...modelOptions,
       });
       return c.json(r);
     } catch (e) {
+      if (e instanceof HistoryError) return c.json({ error: e.message }, e.status);
       return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
     }
   });
@@ -162,6 +192,7 @@ export function createApp(token: string) {
           answer: outcome.answer,
           modelLabel: entry.modelLabel,
           toolCalls: outcome.toolCalls,
+          skillPreviews: outcome.skillPreviews,
         });
       } catch (e) {
         return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
@@ -253,7 +284,7 @@ export function createApp(token: string) {
         (signal) => runAsk(session, body.question!, undefined, signal),
         c.req.raw.signal,
       );
-      return c.json({ answer: outcome.answer, modelLabel, toolCalls: outcome.toolCalls });
+      return c.json({ answer: outcome.answer, modelLabel, toolCalls: outcome.toolCalls, skillPreviews: outcome.skillPreviews });
     } catch (e) {
       return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
     } finally {

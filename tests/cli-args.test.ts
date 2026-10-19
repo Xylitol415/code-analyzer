@@ -65,3 +65,25 @@ test("invalid options and extra arguments fail without including provided creden
     });
   }
 });
+
+test("CLI defaults to a new session and permits selecting any history by ID", () => {
+  assert.equal(parseArgs(["./repo"]).resume, false);
+  for (const flags of [["--session", "older-session-id"], ["--session=older-session-id"]]) {
+    assert.equal(parseArgs(["./repo", ...flags]).historyId, "older-session-id");
+  }
+  assert.equal(parseArgs(["./repo", "--resume"]).resume, true);
+  assert.equal(parseArgs(["./repo", "--new"]).newSession, true);
+  assert.equal(parseArgs(["./repo", "--list-sessions"]).listSessions, true);
+});
+
+test("CLI rejects conflicting session modes and missing history IDs", () => {
+  const choices = [["--new"], ["--resume"], ["--session=history-id"], ["--list-sessions"]];
+  for (let a = 0; a < choices.length; a++) {
+    for (let b = a + 1; b < choices.length; b++) {
+      assert.throws(() => parseArgs(["./repo", ...choices[a], ...choices[b]]), /不能同时|互斥/);
+    }
+  }
+  for (const flags of [["--session"], ["--session="], ["--session", "--new"]]) {
+    assert.throws(() => parseArgs(["./repo", ...flags]), /需要|缺少/);
+  }
+});

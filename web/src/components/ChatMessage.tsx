@@ -1,9 +1,11 @@
-import type { ChatMessage as Msg, ToolCall } from "../types";
+import type { ChatMessage as Msg, ToolCall, SkillPreview } from "../types";
 import { Markdown } from "./Markdown";
+import { CopyReplyButton } from "./CopyReplyButton";
 import { ChevronDownIcon, RobotAvatar, StopIcon, UserAvatar } from "./Icons";
+import { SkillPreviewCard } from "./SkillPreviewCard";
 import { Spinner } from "./Spinner";
 
-export function ChatMessage({ message }: { message: Msg }) {
+export function ChatMessage({ message, onConfirmSkill }: { message: Msg; onConfirmSkill?: (preview: SkillPreview) => Promise<void> }) {
   if (message.role === "user") {
     return (
       <div className="flex justify-end gap-3 px-4 py-3">
@@ -44,7 +46,7 @@ export function ChatMessage({ message }: { message: Msg }) {
                 </summary>
                 <div className="mt-1.5 space-y-1">
                   {message.tools.map((t, i) => (
-                    <ToolRow key={i} tool={t} stopped={!!message.stopped} />
+                    <ToolRow key={i} tool={t} stopped={!!message.stopped} streaming={message.streaming} />
                   ))}
                 </div>
               </details>
@@ -54,13 +56,16 @@ export function ChatMessage({ message }: { message: Msg }) {
 
         {hasContent ? (
           <div className="markdown-body">
-            <Markdown>{message.content}</Markdown>
+            <Markdown streaming={message.streaming && !message.stopped}>{message.content}</Markdown>
           </div>
         ) : message.streaming && !message.stopped ? (
           <div className="flex items-center gap-2 py-2 text-sm text-slate-400">
             <Spinner className="h-4 w-4" /> 正在思考…
           </div>
         ) : null}
+
+        {message.skillPreviews?.map((preview) => <SkillPreviewCard key={preview.id} preview={preview}
+          confirmed={message.confirmedSkillPreviews?.includes(preview.id)} onConfirm={onConfirmSkill} />)}
 
         {message.stopped ? (
           <div role="status" className="mt-2 rounded-lg border border-slate-200 bg-slate-100/70 px-3 py-2.5 text-xs text-slate-500">
@@ -71,21 +76,23 @@ export function ChatMessage({ message }: { message: Msg }) {
               <div className="mt-1 text-slate-500">尚未生成回复内容，你可以重新提问。</div>
             )}
           </div>
-        ) : !message.streaming && !hasContent && !message.error ? (
+        ) : !message.streaming && !hasContent && !message.error && !message.skillPreviews?.length ? (
           <div role="status" className="py-2 text-sm text-slate-500">本次未返回回复内容，请重试。</div>
         ) : null}
 
         {message.error && <div className="mt-2 text-sm text-red-500">错误：{message.error}</div>}
+        {hasContent && !message.streaming && <CopyReplyButton content={message.content} />}
       </div>
     </div>
   );
 }
 
-function ToolRow({ tool, stopped }: { tool: ToolCall; stopped: boolean }) {
+function ToolRow({ tool, stopped, streaming }: { tool: ToolCall; stopped: boolean; streaming: boolean }) {
+  const unfinishedLabel = stopped ? "已停止等待工具结果" : "未收到工具结果";
   return (
     <div className="flex items-center gap-2 text-xs text-slate-600">
-      {tool.isError === undefined && stopped ? (
-        <span title="已停止等待工具结果" aria-label="已停止等待工具结果" className="inline-flex text-slate-400">
+      {tool.isError === undefined && (stopped || !streaming) ? (
+        <span title={unfinishedLabel} aria-label={unfinishedLabel} className="inline-flex text-slate-400">
           <StopIcon className="h-3 w-3" />
         </span>
       ) : tool.isError === undefined ? (

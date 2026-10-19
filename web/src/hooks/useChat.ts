@@ -1,21 +1,25 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ChatMessage, SseEventName, ToolCall } from "../types";
-import { askStream, createSession, deleteSession, type ServerConfig, type SessionModel } from "../api/client";
+import type { ChatMessage, SseEventName, ToolCall, SkillPreview, SkillSnapshot } from "../types";
+import { askStream, createSession, deleteSession, confirmSkillImport, type ServerConfig, type SessionModel } from "../api/client";
 
 const GREETING_PROMPT =
   "会话已建立。请用简短友好的中文向用户打个招呼，介绍你是只读的代码逻辑分析助手，能帮他分析项目整体架构、追踪调用链、解释某段代码逻辑、查看代码演进历史等，并邀请他开始提问。不要冗长。";
-const SUMMARY_PROMPT =
-  "欢迎回来。请用简短的中文总结我们之前讨论过的内容和主要结论，方便用户快速回顾，然后邀请他继续提问。";
 
 export interface UseChatApi {
   messages: ChatMessage[];
   sessionId: string | null;
   modelLabel: string | null;
   streaming: boolean;
-  connect: (project: string, resume: boolean, model?: SessionModel) => Promise<void>;
+  projectPath: string | null;
+  activeConfig: ServerConfig | null;
+  skills: SkillSnapshot["skills"];
+  skillsRevision: number;
+  confirmSkillPreview: (preview: SkillPreview) => Promise<void>;
+  connect: (project: string, resume: boolean, model?: SessionModel, historyId?: string) => Promise<void>;
   send: (question: string) => Promise<void>;
   stop: () => void;
   newSession: () => void;
+  disconnect: (sessionId: string, config: ServerConfig) => Promise<void>;
 }
 
 interface Buffer {
@@ -29,6 +33,7 @@ interface Buffer {
 interface ActiveSession {
   id: string;
   config: ServerConfig;
+  projectPath: string;
 }
 
 interface ActiveStream {
@@ -49,6 +54,12 @@ export function useChat(config: ServerConfig): UseChatApi {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [modelLabel, setModelLabel] = useState<string | null>(null);
   const [streaming, setStreaming] = useState(false);
+  const [projectPath, setProjectPath] = useState<string | null>(null);
+  const [activeConfig, setActiveConfig] = useState<ServerConfig | null>(null);
+  const [skills, setSkills] = useState<SkillSnapshot["skills"]>([]);
+  const [skillsRevision, setSkillsRevision] = useState(0);
+  const previewOrigins = useRef(new Map<string, ActiveSession>());
+
 
   const streamRef = useRef<ActiveStream | null>(null);
   const sessionRef = useRef<ActiveSession | null>(null);
@@ -94,21 +105,49 @@ export function useChat(config: ServerConfig): UseChatApi {
     if (updateState) setStreaming(false);
   }, [flushBuffer]);
 
-  const resetSession = useCallback((updateState = true) => {
+  const resetSession = useCallback((updateState = true, releaseRemote = true) => {
     connectionVersionRef.current += 1;
     stopStream(updateState);
     const previous = sessionRef.current;
     sessionRef.current = null;
-    if (previous) releaseSession(previous);
+    previewOrigins.current.clear();
+    if (previous && releaseRemote) releaseSession(previous);
     if (updateState) {
       setSessionId(null);
+      setProjectPath(null);
+      setActiveConfig(null);
+      setSkills([]);
+      setSkillsRevision(0);
       setModelLabel(null);
       setMessages([]);
       setStreaming(false);
     }
   }, [stopStream]);
 
-  useEffect(() => () => resetSession(false), [resetSession]);
+  useEffect(() => {
+    // Refresh/navigation does not reliably unmount React. keepalive in
+    // deleteSession allows this authenticated request to outlive the page.
+    const pagehide = () => resetSession(false);
+    const pageshow = (event: PageTransitionEvent) => {
+      if (event.persisted) resetSession();
+    };
+    window.addEventListener("pagehide", pagehide);
+    window.addEventListener("pageshow", pageshow);
+    return () => {
+      window.removeEventListener("pagehide", pagehide);
+      window.removeEventListener("pageshow", pageshow);
+      resetSession(false);
+    };
+  }, [resetSession]);
+
+  const disconnect = useCallback(async (id: string, serverConfig: ServerConfig) => {
+    await deleteSession(serverConfig, id);
+    const current = sessionRef.current;
+    // A delayed release of another window must not reset a newer connection.
+    if (current?.id === id && current.config.baseUrl === serverConfig.baseUrl && current.config.token === serverConfig.token) {
+      resetSession(true, false);
+    }
+  }, [resetSession]);
 
   /** 发起一次流式提问；showUser=false 表示开场（不显示为用户气泡）。 */
   const runAsk = useCallback(
@@ -153,6 +192,22 @@ export function useChat(config: ServerConfig): UseChatApi {
         if (streamRef.current !== stream) return;
         const buf = stream.buffer;
         switch (event) {
+          case "skill_preview": {
+            const preview = data as SkillPreview;
+            if (preview.projectPath !== session.projectPath) break;
+            previewOrigins.current.set(preview.id, session);
+            setMessages((prev) => prev.map((message) => message.id === stream.id
+              ? { ...message, skillPreviews: [...(message.skillPreviews ?? []).filter((item) => item.id !== preview.id), preview] }
+              : message));
+            break;
+          }
+          case "skills_applied": {
+            const snapshot = data as SkillSnapshot;
+            if (snapshot.projectPath !== session.projectPath) break;
+            setSkills(snapshot.skills);
+            setSkillsRevision(snapshot.revision);
+            break;
+          }
           case "thinking": {
             const d = data as { delta?: string };
             if (d?.delta) buf.thinking += d.delta;
@@ -213,12 +268,12 @@ export function useChat(config: ServerConfig): UseChatApi {
   );
 
   const connect = useCallback(
-    async (project: string, resume: boolean, model?: SessionModel) => {
+    async (project: string, resume: boolean, model?: SessionModel, historyId?: string) => {
       resetSession();
       const version = connectionVersionRef.current;
       const sessionConfig = { ...config };
-      const s = await createSession(sessionConfig, project, resume, model);
-      const session = { id: s.id, config: sessionConfig };
+      const s = await createSession(sessionConfig, project, resume, model, historyId);
+      const session = { id: s.id, config: sessionConfig, projectPath: s.projectPath };
       // A reset, newer connect, or unmount may have happened while POST was pending.
       if (connectionVersionRef.current !== version) {
         releaseSession(session);
@@ -227,9 +282,15 @@ export function useChat(config: ServerConfig): UseChatApi {
       sessionRef.current = session;
       setSessionId(s.id);
       setModelLabel(s.modelLabel);
-      setMessages([]);
-      // 自动触发开场（不阻塞 connect 返回）：恢复→总结，新建→打招呼
-      void runAsk(session, s.resumed ? SUMMARY_PROMPT : GREETING_PROMPT, { showUser: false });
+      setProjectPath(s.projectPath);
+      setActiveConfig(sessionConfig);
+      setSkills(s.skills ?? []);
+      setSkillsRevision(s.skillsRevision ?? 0);
+      setMessages(s.messages ?? []);
+      // Restoring only loads the transcript; it must not append a new model turn.
+      if (!s.resumed && !historyId) {
+        void runAsk(session, GREETING_PROMPT, { showUser: false });
+      }
     },
     [config, resetSession, runAsk],
   );
@@ -251,8 +312,21 @@ export function useChat(config: ServerConfig): UseChatApi {
     [runAsk],
   );
 
+  const confirmSkillPreview = useCallback(async (preview: SkillPreview) => {
+    const session = previewOrigins.current.get(preview.id);
+    if (!session || sessionRef.current !== session || preview.projectPath !== session.projectPath) {
+      throw new Error("该预览不属于当前会话，请在 Skills 中重新预览。");
+    }
+    const confirmation = await confirmSkillImport(session.config, preview.id);
+    if (sessionRef.current !== session) return;
+    if (confirmation.snapshot.projectPath !== session.projectPath) throw new Error("导入结果的项目不匹配。");
+    setMessages((prev) => prev.map((message) => message.skillPreviews?.some((item) => item.id === preview.id)
+      ? { ...message, confirmedSkillPreviews: [...new Set([...(message.confirmedSkillPreviews ?? []), preview.id])] }
+      : message));
+  }, []);
+
   return useMemo(
-    () => ({ messages, sessionId, modelLabel, streaming, connect, send, stop, newSession }),
-    [messages, sessionId, modelLabel, streaming, connect, send, stop, newSession],
+    () => ({ messages, sessionId, modelLabel, streaming, projectPath, activeConfig, skills, skillsRevision, confirmSkillPreview, connect, send, stop, newSession, disconnect }),
+    [messages, sessionId, modelLabel, streaming, projectPath, activeConfig, skills, skillsRevision, confirmSkillPreview, connect, send, stop, newSession, disconnect],
   );
 }

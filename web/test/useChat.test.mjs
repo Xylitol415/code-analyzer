@@ -13,7 +13,7 @@ function deferred() {
   return { promise, resolve };
 }
 
-async function setup(t) {
+async function setup(t, sessionResponse = {}) {
   const sessions = new Set();
   const requests = [];
   const streams = [];
@@ -27,7 +27,7 @@ async function setup(t) {
       return Response.json({ ok: sessions.delete(id) });
     }
     if (url.endsWith("/sessions")) {
-      const info = { id: `session-${++nextId}`, projectPath: "/project", modelLabel: "Test model", resumed: false };
+      const info = { id: `session-${++nextId}`, projectPath: "/project", modelLabel: "Test model", resumed: false, ...sessionResponse };
       sessions.add(info.id);
       if (delayCreates) {
         const response = deferred();
@@ -58,7 +58,11 @@ async function setup(t) {
   const oldWindow = globalThis.window;
   const oldDocument = globalThis.document;
   const oldActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT;
-  globalThis.window = { fetch, setTimeout, clearTimeout };
+  const lifecycle = new EventTarget();
+  globalThis.window = { fetch, setTimeout, clearTimeout,
+    addEventListener: lifecycle.addEventListener.bind(lifecycle),
+    removeEventListener: lifecycle.removeEventListener.bind(lifecycle),
+  };
   globalThis.document = { removeEventListener() {} };
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   // React 19 deprecates this renderer; retain all other warnings/errors.
@@ -90,6 +94,11 @@ async function setup(t) {
   });
   return {
     get chat() { return chat; }, sessions, requests, streams, pendingCreates, unmount,
+    async pageEvent(type, persisted = false) {
+      const event = new Event(type);
+      Object.defineProperty(event, "persisted", { value: persisted });
+      await act(async () => { lifecycle.dispatchEvent(event); await nextTick(); });
+    },
     delayCreates() { delayCreates = true; },
     async render(serverConfig) {
       await act(async () => { root.update(React.createElement(Harness, { serverConfig })); });
@@ -126,7 +135,7 @@ test("reconnecting releases the previous session", async (t) => {
 });
 
 test("a late session response after reset is released and cannot reconnect the UI", async (t) => {
-  const h = await setup(t);
+  const h = await setup(t, { resumed: true, messages: [{ id: "old", role: "user", content: "old conversation", thinking: "", tools: [], streaming: false }] });
   h.delayCreates();
   let connecting;
   await act(async () => { connecting = h.chat.connect("/project", false); });
@@ -134,7 +143,28 @@ test("a late session response after reset is released and cannot reconnect the U
   await act(async () => { h.pendingCreates[0].finish(); await connecting; });
   assert.equal(h.sessions.size, 0);
   assert.equal(h.chat.sessionId, null);
+  assert.deepEqual(h.chat.messages, []);
   assert.equal(h.streams.length, 0);
+});
+
+test("restoring a selected history displays its transcript without requesting a greeting or summary", async (t) => {
+  const transcript = [
+    { id: "saved-user", role: "user", content: "Explain the queue", thinking: "", tools: [], streaming: false },
+    { id: "saved-assistant", role: "assistant", content: "The queue is serial", thinking: "Read the implementation", tools: [{ name: "read", isError: false }], stopped: true, streaming: false },
+  ];
+  const h = await setup(t, { resumed: true, historyId: "saved-history", messages: transcript });
+  await act(async () => { await h.chat.connect("/project", false, "provider/model", "saved-history"); });
+  const request = h.requests.find((request) => request.url.endsWith("/sessions") && request.method === "POST");
+  assert.equal(JSON.parse(request.body).historyId, "saved-history");
+  assert.deepEqual(h.chat.messages, transcript);
+  assert.equal(h.chat.streaming, false);
+  assert.equal(h.streams.length, 0);
+  let question;
+  await act(async () => { question = h.chat.send("Continue explaining"); });
+  await h.finish(0, "The next detail");
+  await question;
+  assert.deepEqual(h.chat.messages.slice(0, 2), transcript);
+  assert.equal(h.chat.messages.at(-1).content, "The next detail");
 });
 
 test("only the latest overlapping connection can become active", async (t) => {
@@ -232,4 +262,145 @@ test("unmount releases the active server session", async (t) => {
   await h.unmount();
   assert.equal(h.sessions.size, 0);
   assert.equal(h.streams[0].signal.aborted, true);
+});
+
+test("page refresh releases its backend session with original authentication and aborts the stream", async (t) => {
+  const h = await setup(t);
+  await h.connect();
+  await h.render({ baseUrl: "http://edited.test", token: "edited-token" });
+  await h.pageEvent("pagehide");
+  assert.equal(h.sessions.size, 0, "refresh must release the historical session's active lock");
+  assert.equal(h.streams[0].signal.aborted, true);
+  const deletion = h.requests.find((request) => request.method === "DELETE");
+  assert.equal(deletion.url, "http://first.test/sessions/session-1");
+  assert.equal(deletion.headers.Authorization, "Bearer first-token");
+  assert.equal(deletion.keepalive, true);
+  await h.unmount();
+  assert.equal(h.requests.filter((request) => request.method === "DELETE").length, 1);
+});
+
+test("returning from the back-forward cache clears the released connection and late creation cannot reconnect", async (t) => {
+  const h = await setup(t);
+  await h.connect();
+  await h.pageEvent("pagehide", true);
+  await h.pageEvent("pageshow", true);
+  assert.equal(h.chat.sessionId, null);
+  assert.deepEqual(h.chat.messages, []);
+  h.delayCreates();
+  let connecting;
+  await act(async () => { connecting = h.chat.connect("/project", false); });
+  await h.pageEvent("pagehide");
+  await act(async () => { h.pendingCreates[0].finish(); await connecting; });
+  assert.equal(h.sessions.size, 0);
+  assert.equal(h.chat.sessionId, null);
+});
+
+test("manual disconnect affects only the exact backend session and clears its current UI", async (t) => {
+  const h = await setup(t);
+  await h.connect();
+  await act(async () => { await h.chat.disconnect("session-1", { baseUrl: "http://other.test", token: "other-token" }); });
+  assert.equal(h.chat.sessionId, "session-1", "an equal ID on another backend is not the current session");
+  assert.equal(h.streams[0].signal.aborted, false);
+  await act(async () => { await h.chat.disconnect("another-session", config); });
+  assert.equal(h.chat.sessionId, "session-1");
+  await act(async () => { await h.chat.disconnect("session-1", config); });
+  assert.equal(h.chat.sessionId, null);
+  assert.equal(h.streams[0].signal.aborted, true);
+  assert.equal(h.requests.filter((request) => request.method === "DELETE").length, 3, "a confirmed release must not send a duplicate delete");
+});
+
+test("a delayed manual release cannot clear a replacement session and failed release keeps its connection", async (t) => {
+  const h = await setup(t);
+  await h.connect();
+  const fetch = globalThis.fetch;
+  const delayed = deferred();
+  t.mock.method(globalThis, "fetch", (url, options) => options?.method === "DELETE"
+    ? delayed.promise : fetch(url, options));
+  let releasing;
+  await act(async () => { releasing = h.chat.disconnect("session-1", config); });
+  await h.connect();
+  assert.equal(h.chat.sessionId, "session-2");
+  await act(async () => { delayed.resolve(Response.json({ ok: true })); await releasing; });
+  assert.equal(h.chat.sessionId, "session-2");
+  t.mock.method(globalThis, "fetch", async () => Response.json({ error: "unauthorized" }, { status: 401 }));
+  await act(async () => { await assert.rejects(() => h.chat.disconnect("session-2", config), /401/); });
+  assert.equal(h.chat.sessionId, "session-2");
+  // Let normal teardown release this synthetic session without logging failures.
+  t.mock.method(globalThis, "fetch", fetch);
+});
+
+const skillPreview = {
+  id: "preview-1", projectPath: "/canonical/project", expiresAt: "2099-01-01T00:00:00.000Z", warnings: [],
+  skill: { id: "skill-1", name: "review", description: "Review code", version: "hash-1", source: { kind: "url", label: "https://skills.test/SKILL.md" }, disableModelInvocation: false, files: [{ path: "SKILL.md", size: 55 }] },
+};
+
+test("skill events track the actual session project, ignore another project and retain confirmation cards after completion", async (t) => {
+  const h = await setup(t, { projectPath: "/canonical/project", skillsRevision: 2, skills: [] });
+  await h.connect();
+  assert.equal(h.chat.projectPath, "/canonical/project");
+  assert.deepEqual(h.chat.activeConfig, config);
+  assert.equal(h.chat.skillsRevision, 2);
+  await act(async () => {
+    h.streams[0].event("skill_preview", { ...skillPreview, id: "wrong", projectPath: "/other" });
+    h.streams[0].event("skill_preview", skillPreview);
+    h.streams[0].event("skills_applied", { projectPath: "/canonical/project", revision: 3, skills: [skillPreview.skill] });
+    h.streams[0].event("skills_applied", { projectPath: "/other", revision: 99, skills: [] });
+    await nextTick();
+  });
+  await h.finish(0, "Please confirm");
+  assert.equal(h.chat.skillsRevision, 3);
+  assert.equal(h.chat.skills.length, 1);
+  assert.deepEqual(h.chat.messages[0].skillPreviews, [skillPreview]);
+  await act(async () => { h.chat.newSession(); });
+  assert.equal(h.chat.projectPath, null);
+  assert.equal(h.chat.activeConfig, null);
+  assert.deepEqual(h.chat.skills, []);
+  assert.equal(h.chat.skillsRevision, 0);
+});
+
+test("conversation confirmation uses its original backend and a late confirmation cannot attach to a replacement session", async (t) => {
+  const h = await setup(t, { projectPath: "/canonical/project", resumed: true });
+  await h.connect();
+  let question;
+  await act(async () => { question = h.chat.send("import https://skills.test/SKILL.md"); });
+  await act(async () => { h.streams[0].event("skill_preview", skillPreview); await nextTick(); });
+  await h.finish(0, "Review this preview");
+  await question;
+  await h.render({ baseUrl: "http://draft.test", token: "draft-token" });
+  const originalFetch = globalThis.fetch;
+  const confirmation = deferred();
+  const requests = [];
+  t.mock.method(globalThis, "fetch", (url, options) => {
+    if (!url.includes("/confirm")) return originalFetch(url, options);
+    requests.push({ url, ...options });
+    return confirmation.promise;
+  });
+  let confirming;
+  await act(async () => { confirming = h.chat.confirmSkillPreview(skillPreview); });
+  assert.equal(requests[0].url, "http://first.test/skills/imports/preview-1/confirm");
+  assert.equal(requests[0].headers.Authorization, "Bearer first-token");
+  await h.connect();
+  await act(async () => {
+    confirmation.resolve(Response.json({ previewId: skillPreview.id, installed: skillPreview.skill, snapshot: { projectPath: "/canonical/project", revision: 5, skills: [skillPreview.skill] } }));
+    await confirming;
+  });
+  assert.equal(h.chat.sessionId, "session-2");
+  assert.deepEqual(h.chat.messages, []);
+  assert.equal(h.chat.skillsRevision, 0, "confirmation is pending for the next question; applied metadata comes from runtime events");
+  await assert.rejects(() => h.chat.confirmSkillPreview(skillPreview), /不属于当前会话/);
+  assert.equal(requests.length, 1);
+});
+
+test("successful conversation confirmation preserves the preview and records confirmed status without inventing applied revision", async (t) => {
+  const h = await setup(t, { projectPath: "/canonical/project" });
+  await h.connect();
+  await act(async () => { h.streams[0].event("skill_preview", skillPreview); await nextTick(); });
+  const originalFetch = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", (url, options) => url.includes("/confirm")
+    ? Promise.resolve(Response.json({ previewId: skillPreview.id, installed: skillPreview.skill, snapshot: { projectPath: "/canonical/project", revision: 8, skills: [skillPreview.skill] } }))
+    : originalFetch(url, options));
+  await act(async () => { await h.chat.confirmSkillPreview(skillPreview); });
+  await h.finish(0, "ready");
+  assert.deepEqual(h.chat.messages[0].confirmedSkillPreviews, [skillPreview.id]);
+  assert.equal(h.chat.skillsRevision, 0);
 });

@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useChat } from "./hooks/useChat";
-import { listModels, type ModelInfo, type ServerConfig } from "./api/client";
-import { ConfigBar, type ModelMode, type ModelStatus } from "./components/ConfigBar";
+import { listHistory, listModels, type HistorySessionInfo, type ModelInfo, type ServerConfig } from "./api/client";
+import { ConfigBar, type HistoryStatus, type SessionMode, type ModelMode, type ModelStatus } from "./components/ConfigBar";
 import { ChatMessage } from "./components/ChatMessage";
 import { MessageInput } from "./components/MessageInput";
 import { ToastContainer, useToast } from "./components/Toast";
+import { SkillsManager } from "./components/SkillsManager";
 import { SparkleIcon } from "./components/Icons";
 
 interface ModelDiscovery {
@@ -14,11 +15,20 @@ interface ModelDiscovery {
   error?: string;
 }
 
+interface HistoryDiscovery {
+  scope: object;
+  sessions: HistorySessionInfo[];
+  error?: string;
+}
+
 export default function App() {
   const [baseUrl, setBaseUrl] = useState("http://127.0.0.1:8787");
   const [token, setToken] = useState("");
   const [project, setProject] = useState("");
-  const [resume, setResume] = useState(false);
+  const [sessionMode, setSessionMode] = useState<SessionMode>("new");
+  const [historyId, setHistoryId] = useState("");
+  const [historyDiscovery, setHistoryDiscovery] = useState<HistoryDiscovery | null>(null);
+  const [historyRevision, setHistoryRevision] = useState(0);
   const [model, setModel] = useState("");
   const [modelMode, setModelMode] = useState<ModelMode>("backend");
   const [llmBaseUrl, setLlmBaseUrl] = useState("");
@@ -26,6 +36,7 @@ export default function App() {
   const [llmModel, setLlmModel] = useState("");
   const [discovery, setDiscovery] = useState<ModelDiscovery | null>(null);
   const [connecting, setConnecting] = useState(false);
+  const [releasingHistoryId, setReleasingHistoryId] = useState<string | null>(null);
 
   const normalizedBaseUrl = baseUrl.trim().replace(/\/+$/, "");
   const normalizedToken = token.trim();
@@ -35,6 +46,13 @@ export default function App() {
   );
   const chat = useChat(config);
   const { toasts, show } = useToast();
+  const skillsConfig = chat.activeConfig ?? config;
+  const skillsProject = chat.sessionId ? chat.projectPath ?? "" : project.trim();
+  const skillsBinding = useMemo(() => ({
+    config: skillsConfig, project: skillsProject, connected: !!chat.sessionId,
+  }), [chat.sessionId, skillsConfig, skillsProject]);
+  // A new binding owns a fresh dialog and revokes all pending preview/confirm UI.
+  const skillsBindingKey = useMemo(() => crypto.randomUUID(), [skillsBinding]);
   // Only expose results belonging to the current address and token, even before
   // the effect cleanup runs after a configuration change.
   const currentDiscovery = discovery?.config === config ? discovery : null;
@@ -51,7 +69,59 @@ export default function App() {
     llmUrlValid = ["http:", "https:"].includes(url.protocol) && !url.username && !url.password && !url.search && !url.hash;
   } catch { /* An incomplete URL is expected while typing. */ }
   const selectionReady = modelMode === "backend" ? modelReady : llmUrlValid && !!llmModel.trim();
-  const canConnect = !!project.trim() && !!config.baseUrl && !!config.token && selectionReady && !connecting;
+  const historyScope = useMemo(
+    () => ({ config, project: project.trim(), revision: historyRevision }),
+    [config, project.trim(), historyRevision],
+  );
+  const currentHistory = historyDiscovery?.scope === historyScope ? historyDiscovery : null;
+  const histories = currentHistory?.sessions ?? [];
+  const historyStatus: HistoryStatus = !config.token ? "missing-token"
+    : !config.baseUrl ? "missing-url"
+      : !project.trim() ? "missing-project"
+        : !currentHistory ? "loading"
+          : currentHistory.error ? "error" : "ready";
+  const selectedHistory = histories.find((session) => session.id === historyId && !session.active);
+  const canConnect = !!project.trim() && !!config.baseUrl && !!config.token && selectionReady
+    && (sessionMode === "new" || !!selectedHistory) && !connecting && !releasingHistoryId;
+
+  const refreshHistory = () => setHistoryRevision((revision) => revision + 1);
+  const changeSessionMode = (mode: SessionMode) => {
+    setSessionMode(mode);
+    if (mode === "history") refreshHistory();
+  };
+
+  const releaseHistory = async (session: HistorySessionInfo) => {
+    if (!session.activeSessionId || releasingHistoryId) return;
+    setReleasingHistoryId(session.id);
+    try {
+      await chat.disconnect(session.activeSessionId, config);
+      refreshHistory();
+      show("success", "会话已退出，历史记录已保留");
+    } finally {
+      setReleasingHistoryId(null);
+    }
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    setHistoryId("");
+    setHistoryDiscovery(null);
+    if (sessionMode !== "history" || !config.token || !config.baseUrl || !historyScope.project) return;
+    const timer = window.setTimeout(() => {
+      listHistory(config, historyScope.project)
+        .then((result) => {
+          if (!cancelled) setHistoryDiscovery({ scope: historyScope, sessions: result.sessions });
+        })
+        .catch((error: unknown) => {
+          if (!cancelled) setHistoryDiscovery({
+            scope: historyScope,
+            sessions: [],
+            error: error instanceof Error ? error.message : "无法加载历史会话，请检查后端地址和服务状态。",
+          });
+        });
+    }, 400);
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [config, historyScope, sessionMode]);
 
   // Debounce typing and keep authentication errors inline rather than toasting
   // once for each partially entered token.
@@ -93,14 +163,14 @@ export default function App() {
     if (!canConnect) return false;
     setConnecting(true);
     try {
-      await chat.connect(project.trim(), resume, modelMode === "custom" ? {
+      await chat.connect(project.trim(), false, modelMode === "custom" ? {
         llm: {
           baseUrl: llmBaseUrl.trim().replace(/\/+$/, ""),
           ...(llmApiKey.trim() ? { apiKey: llmApiKey.trim() } : {}),
           model: llmModel.trim(),
         },
-      } : model);
-      show("success", "会话已建立");
+      } : model, sessionMode === "history" ? selectedHistory?.id : undefined);
+      show("success", sessionMode === "history" ? "历史会话已恢复" : "会话已建立");
       return true;
     } catch (e) {
       show("error", (e as Error).message);
@@ -116,7 +186,12 @@ export default function App() {
         baseUrl={baseUrl}
         token={token}
         project={project}
-        resume={resume}
+        sessionMode={sessionMode}
+        histories={histories}
+        historyStatus={historyStatus}
+        historyError={currentHistory?.error}
+        historyId={selectedHistory?.id ?? ""}
+        releasingHistoryId={releasingHistoryId}
         model={model}
         models={models}
         modelStatus={modelStatus}
@@ -133,7 +208,10 @@ export default function App() {
         onBaseUrlChange={setBaseUrl}
         onTokenChange={setToken}
         onProjectChange={setProject}
-        onResumeChange={setResume}
+        onSessionModeChange={changeSessionMode}
+        onHistorySelect={setHistoryId}
+        onHistoryRefresh={refreshHistory}
+        onHistoryRelease={releaseHistory}
         onModelChange={setModel}
         onModelModeChange={setModelMode}
         onLlmBaseUrlChange={setLlmBaseUrl}
@@ -141,17 +219,18 @@ export default function App() {
         onLlmModelChange={setLlmModel}
         onConnect={handleConnect}
         onNewSession={chat.newSession}
+        skillsControl={<SkillsManager key={skillsBindingKey} binding={skillsBinding} appliedCount={chat.skills.length} appliedRevision={chat.skillsRevision} />}
       />
 
       <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-3xl">
+        <div className="mx-auto max-w-5xl">
           {chat.messages.length === 0 ? (
             <div className="flex flex-col items-center justify-center gap-3 py-24 text-slate-400">
               <SparkleIcon className="h-10 w-10 text-indigo-300" />
-              <p className="text-sm">点击右上角「会话配置」开始分析</p>
+              <p className="text-sm">通过右上角新建会话，或选择历史会话继续分析</p>
             </div>
           ) : (
-            chat.messages.map((m) => <ChatMessage key={m.id} message={m} />)
+            chat.messages.map((m) => <ChatMessage key={m.id} message={m} onConfirmSkill={chat.confirmSkillPreview} />)
           )}
         </div>
       </div>

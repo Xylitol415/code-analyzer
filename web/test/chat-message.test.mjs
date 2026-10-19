@@ -50,3 +50,12 @@ test("an error explains an empty reply without a duplicate empty-result hint", (
   assert.match(html, /模型连接失败/);
   assert.doesNotMatch(html, /本次未返回回复内容|尚未生成回复内容|animate-spin/);
 });
+
+test("an unfinished historical tool is not displayed as still running or successful", () => {
+  const html = renderMessage({
+    content: "读取文件时会话中断",
+    tools: [{ name: "read", args: { path: "index.ts" } }],
+  });
+  assert.match(html, /未收到工具结果/);
+  assert.doesNotMatch(html, /animate-spin|text-emerald-500|已停止回复/);
+});
