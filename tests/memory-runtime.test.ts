@@ -45,6 +45,27 @@ function fixture() {
   return { session, service, records, pending, manager, calls: () => calls, setSnapshot: (x) => current = x, setValid: (x) => valid = x, setExact: (x) => exact = x };
 }
 
+test("applied steering binds knowledge candidates to the corrected question and preserves retry identity", async () => {
+  const f = fixture(); f.setExact(undefined);
+  runtime.attachSessionMemory(f.session, { projectPath: "/project", service: f.service });
+  const originalPrompt = f.session.prompt;
+  let projected;
+  f.session.prompt = async function (question, options) {
+    runtime.applyMemorySteering(this, { requestId: "correction", question: "Only describe the read path", targetRequestId: "original" });
+    projected = await this.agent.transformContext([{ role: "user", content: "correction", timestamp: 1 }]);
+    return originalPrompt.call(this, question, options);
+  };
+  const outcome = await runAsk(f.session, "Describe all writes", undefined, undefined, { requestId: "original" });
+  const record = f.records.get("original");
+  assert.equal(record.originalQuestion, "Describe all writes");
+  assert.match(record.question, /Describe all writes/);
+  assert.match(record.question, /Only describe the read path/);
+  assert.deepEqual(record.steering, [{ requestId: "correction", question: "Only describe the read path" }]);
+  assert.doesNotMatch(JSON.stringify(projected), /Reviewed answer/);
+  assert.equal((await runAsk(f.session, "Describe all writes", undefined, undefined, { requestId: "original" })).metadata.answerId, outcome.metadata.answerId);
+  assert.equal(f.calls(), 1);
+});
+
 test("first reviewed hit appends actual conversation, survives refresh, and retry never duplicates history", async () => {
   const f = fixture();
   runtime.attachSessionMemory(f.session, { projectPath: "/project", service: f.service });

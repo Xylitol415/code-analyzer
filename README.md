@@ -203,7 +203,10 @@ npm run serve -- --port 8787 --token my-secret-key
 | GET | `/history?project=<项目路径或URL>` | 本项目持久化历史，返回 `{projectPath, sessions:[{id,title,createdAt,updatedAt,messageCount,modelLabel?,active?,activeSessionId?}]}` |
 | POST | `/sessions` | 建会话或恢复，body `{project, historyId?, resume?, modelId?, llm?, sessionId?}` → `{id, historyId, projectPath, modelLabel, resumed, messages}` |
 | GET | `/sessions` | 列出活动会话 |
-| POST | `/sessions/:id/ask` | 提问，body `{question, requestId?, reuse?}`；默认 SSE 流式，`?stream=false` 返回 JSON |
+| POST | `/sessions/:id/ask` | 提问／排队，body `{question, requestId?, reuse?, mode?: "followUp"}`；默认 SSE 流式，`?stream=false` 返回 JSON |
+| POST | `/sessions/:id/steer` | 引导当前任务，body `{question, requestId, targetRequestId}`；202 返回 `{message,state}` |
+| GET | `/sessions/:id/messages` | 查看活动任务与待处理消息，返回 `{revision,activeRequestId,pending}` |
+| DELETE | `/sessions/:id/messages/:messageId` | 撤回尚未执行／采用的消息，返回 `{message,state}`；已执行／采用返回 409 |
 | DELETE | `/sessions/:id` | 释放会话 |
 | POST | `/ask` | 一次性提问，body `{project, question, modelId?, llm?, requestId?, reuse?}`；默认 JSON，`?stream=true` 流式 |
 
@@ -264,12 +267,20 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/jso
 | `thinking` | `{"delta":"..."}` 推理增量 |
 | `tool` | `{"name":"read","args":{...},"phase":"start"}` 或 `{"name":"read","phase":"end","isError":false}` |
 | `text` | `{"delta":"..."}` 回答增量 |
-| `done` | `{"modelLabel":"...","answer":"完整回答"}` |
+| `queue` | `{revision,activeRequestId,pending}` 完整队列状态，用递增 revision 避免旧响应覆盖新状态 |
+| `started` | `{requestId,question,revision}` 该请求开始执行；revision 用于排列跨 SSE 连接到达的消息 |
+| `steering_applied` | `{requestId,question,targetRequestId}` 引导被当前任务采用，之后的输出属于新回答段 |
+| `cancelled` | `{requestId}` 等待中的请求被删除，随后关闭该请求的 SSE |
+| `done` | `{"modelLabel":"...","answer":"最终回答段"}`；引导前已输出的回答段保留 |
 | `error` | `{"message":"..."}` |
 
 记忆功能可用且回答成功完成时，JSON 响应和 SSE `done` 还会包含 `answerId`、`answerVersion`、`source`、`knowledgeIds` 与 `usage`，恢复历史时保留这些标识。`source` 区分模型生成（`generated`）、知识直接复用（`exact`）和参考知识生成（`assisted`）。旧上下文失效时返回 `code: "context_stale"`、`newSessionRequired: true`；JSON 使用 HTTP 409，已经建立的 SSE 通过 `error` 事件通知。
 
 > 同一会话的请求会**串行排队**（pi 的单会话模型同一时刻只允许一个 prompt）；不同会话之间并行。客户端断开 SSE 连接时，仅取消该连接对应的请求：排队中的请求会被跳过，正在执行的请求会被中止，其他请求不受影响。
+
+引导消息绑定 `targetRequestId`，在 pi 下一次助手执行边界采用，不会立即中断正在接收的输出。上下文准备中或任务已结束时提交引导返回 409，网页保留草稿，可稍后重试或排队。未采用时可通过 DELETE 撤回；目标任务结束／停止后仍未采用的引导标记为 `unapplied`，不会进入下一任务。每条排队问题有独立的 ask/SSE 生命周期，按顺序重新校验源码、知识与 Skills。每会话最多保留 50 条待处理消息，超过返回 429；待处理状态只保存在当前后端进程内，重启后清空。
+
+引导会作为真实用户消息写入历史；知识候选的问题同时包含原问题和已采用的更正，避免更正后的答案被关联到原问题。重试仍以原始 `requestId` 和问题进行匹配。引导使用本轮已加载的 Skills 快照，技能配置变更在下一条独立问题执行时生效。
 
 `DELETE /sessions/:id` 会立即移除活动会话、拒绝新任务并跳过尚未执行的任务，等待当前任务及其中止操作结束后再释放资源。删除操作只释放运行中的会话，不删除磁盘上的历史记录。Web 在新建、重新连接或组件卸载时调用此接口；网络断开或浏览器崩溃时仍可能无法送达清理请求。
 
@@ -304,6 +315,13 @@ cd web && npm install && npm run dev
 刷新、关闭或离开网页时，前端通过 `pagehide` 发送带鉴权的 `keepalive` 请求退出当前会话。浏览器崩溃、断网等情况下自动清理可能无法送达；可在历史列表中点击使用中条目旁的「退出会话」，确认后释放占用，再选择该历史继续。退出会保留历史记录；如果该会话仍被其他窗口使用，也会中止其任务。
 
 功能：流式回答（Markdown 渲染）、思考过程/工具调用可折叠查看、多轮追问、按项目列出与恢复历史、新建会话、停止回答，以及顶栏「技能」「知识库」管理入口。
+
+### 回答中的引导与排队
+
+- **空闲时**：点击「发送」或 Enter，立即执行问题。
+- **回答中**：点击「引导」更正当前任务，或点击「排队」等待当前任务完成后独立回答；此时 Enter 默认排队，Shift+Enter 换行。
+- **待处理卡片**：固定展示在输入框上方，区分「待采用」「待执行」「未采用」。点击「撤回编辑」会先取消后端消息，再将原文回填；输入框已有草稿时会提示先处理草稿。「删除」直接取消后端待处理消息。
+- **执行边界**：已经采用／开始执行的消息不能撤回，页面保留明确提示。点击「停止当前」只中止当前问题，排队问题继续；新建／退出会话会清空待处理消息。
 
 回复中的 `mermaid` 围栏代码块会直接绘制为图表，页面隐藏源码。完整图块可在回复继续生成时显示；尚未闭合时显示生成提示，停止后未完成或语法错误时显示说明。图表按需加载并适配消息宽度，特别宽的架构图可横向滚动。
 
@@ -408,6 +426,7 @@ code-analyzer/
 │   ├── repl.ts                 # 终端 REPL（流式 + 思考/工具可视化）
 │   ├── server.ts               # HTTP 服务（Hono，SSE + JSON，Bearer 鉴权）
 │   ├── session-registry.ts     # 会话注册表 + 每会话串行队列
+│   ├── session-messages.ts     # 待处理消息、引导采用边界与撤回协调
 │   ├── memory/                 # 记忆与知识复用：运行时、SQLite、zvec、源码校验、Worker
 │   ├── memory-routes.ts        # 知识列表、反馈、证据核验与审核接口
 │   └── config.ts               # .env / 环境变量加载

@@ -1,9 +1,10 @@
 import { access } from "node:fs/promises";
-import { constants } from "node:fs";
+import { constants, readFileSync } from "node:fs";
 import {
   createExtensionRuntime,
   defineTool,
   loadProjectContextFiles,
+  stripFrontmatter,
   type AgentSession,
   type ResourceLoader,
   type Skill,
@@ -38,7 +39,11 @@ export class ControlledSkillResourceLoader implements ResourceLoader {
   replaceSnapshot(snapshot: SkillSnapshot): void { this.current = snapshot; }
   beginTurn(question: string): void {
     // Extract from the original human input only; retrieved files/tool outputs never authorize network imports.
-    this.originalTurnURLs = new Set(question.match(/https:\/\/[^\s<>"'`\[\]()]+/g) ?? []);
+    this.originalTurnURLs.clear();
+    this.addTurnInput(question);
+  }
+  addTurnInput(question: string): void {
+    for (const url of question.match(/https:\/\/[^\s<>"'`\[\]()]+/g) ?? []) this.originalTurnURLs.add(url);
   }
   endTurn(): void { this.originalTurnURLs.clear(); }
   allowsURL(url: string): boolean { return this.originalTurnURLs.has(url); }
@@ -76,6 +81,25 @@ export function attachSessionSkills(session: BoundSession, loader: ControlledSki
   bindings.set(session, { session, loader, service });
 }
 export function getSessionSkills(session: object): SkillSnapshot | undefined { return bindings.get(session)?.loader.snapshot; }
+
+/** Prepare against the current immutable snapshot; never reload a running turn. */
+export function prepareSessionSkillSteering(session: object, question: string): string {
+  const normalized = question.replace(/^\/skill(?::|\s+)(\S+)(?:\s+|$)/, "/skill:$1 ");
+  if (!/^\/skill(?::|\s|$)/.test(normalized)) return question;
+  const invocation = /^\/skill:([^\s]+)(?:\s+([\s\S]*))?$/.exec(normalized);
+  if (!invocation) throw Object.assign(new Error("请指定 Skill 名称：/skill:<名称> 问题"), { status: 400 });
+  const skill = bindings.get(session)?.loader.snapshot.skills.find(entry => entry.name === invocation[1]);
+  if (!skill) throw Object.assign(new Error(`Skill "${invocation[1]}" 未启用或不存在，请排队后刷新技能或选择已启用的技能。`), { status: 400 });
+  let body: string;
+  try { body = stripFrontmatter(readFileSync(skill.filePath, "utf8")).trim(); }
+  catch { throw Object.assign(new Error(`Skill "${skill.name}" 文件不可读，请重新导入后重试。`), { status: 400 }); }
+  const block = `<skill name="${skill.name}" location="${skill.filePath}">\nReferences are relative to ${skill.baseDir}.\n\n${body}\n</skill>`;
+  return invocation[2]?.trim() ? `${block}\n\n${invocation[2].trim()}` : block;
+}
+/** Only the actually adopted human input can add URL import authorization. */
+export function applySessionSkillSteering(session: object, question: string): void {
+  bindings.get(session)?.loader.addTurnInput(question);
+}
 
 /** Called inside the host's existing session queue immediately before prompt(). */
 export async function refreshSessionSkills(session: object, question: string, signal?: AbortSignal): Promise<SkillSnapshot | undefined> {

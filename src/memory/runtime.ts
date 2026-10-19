@@ -4,6 +4,7 @@ import { MemoryError } from "./errors.js";
 import { getSessionSkills } from "../skills/runtime.js";
 import { isAutomaticQuestion } from "../session-history.js";
 import type { AnswerMetadata, AnswerRecord, KnowledgeItem, MemoryService, SourceSnapshot, UsageReport } from "./types.js";
+import type { SteeringApplied } from "../session-message-types.js";
 
 export interface AskOptions { requestId?: string; reuse?: "auto" | "bypass" }
 export class StaleContextError extends Error {
@@ -22,7 +23,7 @@ export class MemoryRequestError extends Error {
 
 type RuntimeSession = Pick<AgentSession, "agent" | "sessionManager" | "refreshContext" | "model" | "systemPrompt" | "getSessionStats">;
 interface Binding { session: RuntimeSession; projectPath: string; service: MemoryService; evidence?: string; turn?: MemoryTurn }
-export interface MemoryTurn { binding: Binding; snapshot: SourceSnapshot; policyHash: string; question: string; requestId: string; historyId: string; started: number; entryIds: Set<string>; knowledgeIds: string[]; tokens?: ReturnType<AgentSession["getSessionStats"]>["tokens"] }
+export interface MemoryTurn { binding: Binding; snapshot: SourceSnapshot; policyHash: string; question: string; requestId: string; historyId: string; started: number; entryIds: Set<string>; knowledgeIds: string[]; steering?: Array<{ requestId: string; question: string }>; tokens?: ReturnType<AgentSession["getSessionStats"]>["tokens"] }
 export interface MemoryResult { answer: string; metadata: AnswerMetadata; snapshot: SourceSnapshot }
 const bindings = new WeakMap<object, Binding>();
 
@@ -81,12 +82,25 @@ export function sessionPolicyHash(session: RuntimeSession): string {
 }
 const noModelUsage: UsageReport = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, quality: "no-model-call" };
 function newRecord(turn: MemoryTurn, answer: string, source: AnswerRecord["source"], usage: UsageReport): AnswerRecord {
+  const corrections = turn.steering?.length ? turn.steering : undefined;
   return { id: randomUUID(), version: randomUUID(), requestId: turn.requestId, historyId: turn.historyId,
-    question: turn.question, answer, status: "completed", source, snapshot: turn.snapshot, policyHash: turn.policyHash,
+    question: corrections ? [turn.question, ...corrections.map((entry, i) => `用户引导 ${i + 1}：${entry.question}`)].join("\n\n") : turn.question,
+    ...(corrections ? { originalQuestion: turn.question, steering: [...corrections] } : {}),
+    answer, status: "completed", source, snapshot: turn.snapshot, policyHash: turn.policyHash,
     knowledgeIds: turn.knowledgeIds, assistantEntryIds: [], usage, elapsedMs: Date.now() - turn.started, createdAt: new Date().toISOString() };
 }
 function sameRequest(record: AnswerRecord, question: string): void {
-  if (record.question !== question || record.status !== "completed") throw new MemoryRequestError("requestId 已用于其他问题或未完成的请求，请使用新的 requestId。");
+  if ((record.originalQuestion ?? record.question) !== question || record.status !== "completed") throw new MemoryRequestError("requestId 已用于其他问题或未完成的请求，请使用新的 requestId。");
+}
+
+/** Corrections alter the knowledge candidate, while request retries keep their identity. */
+export function applyMemorySteering(session: object, message: SteeringApplied): void {
+  const binding = bindings.get(session);
+  const turn = binding?.turn;
+  if (!binding || !turn || turn.requestId !== message.targetRequestId) return;
+  (turn.steering ??= []).push({ requestId: message.requestId, question: message.question });
+  // Evidence selected for the old question must not be re-injected for a correction.
+  binding.evidence = undefined;
 }
 function markStale(binding: Binding, reason: StaleContextError["reason"]): never {
   binding.session.sessionManager.appendCustomEntry("answer_context_stale", { reason });

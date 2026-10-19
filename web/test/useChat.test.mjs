@@ -460,3 +460,337 @@ test("stale context blocks later asks and starts fresh on the active backend wit
   assert.equal(h.chat.contextStale, false);
   assert.equal(h.chat.messages.some((item) => item.content === "Question"), false);
 });
+
+test('follow-ups keep separate streams and enter history only when started', async t => {
+  const h = await setup(t, {resumed: true});
+  await h.connect(); await h.start();
+  assert.equal(typeof h.chat.followUp, 'function');
+  let accepted;
+  await act(async () => { accepted = h.chat.followUp('Next question', 'bypass'); });
+  const request = JSON.parse(h.requests.filter(r => r.url.endsWith('/ask'))[1].body);
+  assert.equal(request.mode, 'followUp');
+  const pending = {id: request.requestId, question: 'Next question', mode: 'followUp', createdAt: 1, status: 'pending', reuse: 'bypass'};
+  await act(async () => { h.streams[1].event('queue', {revision: 2, activeRequestId: 'first', pending: [pending]}); await nextTick(); await accepted; });
+  assert.equal(h.chat.messages.length, 2);
+  assert.deepEqual(h.chat.pendingMessages, [pending]);
+  assert.equal(h.streams[0].signal.aborted, false);
+  await act(async () => { h.chat.stop(); });
+  assert.equal(h.streams[0].signal.aborted, true);
+  assert.equal(h.streams[1].signal.aborted, false);
+  await act(async () => {
+    h.streams[1].event('started', {requestId: request.requestId, question: 'Next question'});
+    h.streams[1].event('queue', {revision: 3, activeRequestId: request.requestId, pending: []});
+    await nextTick();
+  });
+  assert.equal(h.chat.messages.at(-2).content, 'Next question');
+  assert.equal(h.chat.streaming, true);
+  await h.finish(1, 'Next answer');
+  assert.equal(h.chat.messages.at(-1).content, 'Next answer');
+  assert.equal(h.chat.streaming, false);
+});
+
+test('steering splits partial replies and keeps answer identity on the final segment', async t => {
+  const h = await setup(t, {resumed: true});
+  await h.connect(); await h.start();
+  const requestId = JSON.parse(h.requests.find(r => r.url.endsWith('/ask')).body).requestId;
+  await act(async () => {
+    h.streams[0].event('text', {delta: 'Before correction'});
+    h.streams[0].event('steering_applied', {requestId: 'correction', question: 'Focus on errors', targetRequestId: requestId});
+    h.streams[0].event('text', {delta: 'After correction'});
+    h.streams[0].event('done', {answer: 'After correction', answerId: 'final-answer'});
+    h.streams[0].close(); await nextTick();
+  });
+  assert.deepEqual(h.chat.messages.map(m => m.content), ['First user question', 'Before correction', 'Focus on errors', 'After correction']);
+  assert.equal(h.chat.messages[1].streaming, false);
+  assert.equal(h.chat.messages[1].answerId, undefined);
+  assert.equal(h.chat.messages[3].answerId, 'final-answer');
+});
+
+test('queue revisions and abandoned sessions cannot resurrect pending cards', async t => {
+  const h = await setup(t, {resumed: true});
+  await h.connect(); await h.start();
+  const pending = {id: 'pending', question: 'Next', mode: 'followUp', createdAt: 1, status: 'pending'};
+  await act(async () => {
+    h.streams[0].event('queue', {revision: 4, activeRequestId: 'active', pending: [pending]});
+    h.streams[0].event('queue', {revision: 3, activeRequestId: 'active', pending: []}); await nextTick();
+  });
+  assert.deepEqual(h.chat.pendingMessages, [pending]);
+  await h.connect();
+  await act(async () => { h.streams[0].event('queue', {revision: 99, activeRequestId: 'old', pending: [pending]}); await nextTick(); });
+  assert.deepEqual(h.chat.pendingMessages, []);
+});
+
+test('stopping reconciles pending steering without a live stream and stops polling after unapplied', async t => {
+  const h = await setup(t, {resumed: true});
+  await h.connect(); await h.start();
+  const pending = {id: 'steer', question: 'Correction', mode: 'steer', targetRequestId: h.chat.activeRequestId, createdAt: 1, status: 'pending'};
+  const originalFetch = globalThis.fetch;
+  let reads = 0;
+  t.mock.method(globalThis, 'fetch', (url, options) => {
+    if (url.endsWith('/messages')) {reads++; return Promise.resolve(Response.json({revision: 5, activeRequestId: null, pending: [{...pending, status: 'unapplied'}]}));}
+    return originalFetch(url, options);
+  });
+  await act(async () => {h.streams[0].event('queue', {revision: 4, activeRequestId: h.chat.activeRequestId, pending: [pending]}); await nextTick();});
+  t.mock.timers.enable({apis: ['setTimeout']});
+  t.mock.method(window, 'setTimeout', globalThis.setTimeout);
+  t.mock.method(window, 'clearTimeout', globalThis.clearTimeout);
+  await act(async () => {h.chat.stop();});
+  await act(async () => {t.mock.timers.tick(1000); await nextTick();});
+  assert.equal(reads, 1);
+  assert.equal(h.chat.pendingMessages[0].status, 'unapplied');
+  await act(async () => {t.mock.timers.tick(5000); await nextTick();});
+  assert.equal(reads, 1);
+  t.mock.timers.reset();
+});
+
+test('steer binds active identity, cancellation waits and old responses cannot refill a new session', async t => {
+  const h = await setup(t, {resumed: true});
+  await h.connect(); await h.start();
+  const active = h.chat.activeRequestId;
+  const originalFetch = globalThis.fetch;
+  let pending;
+  const removed = deferred();
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    if (url.endsWith('/steer')) {
+      const body = JSON.parse(options.body); assert.equal(body.targetRequestId, active);
+      pending = {id: body.requestId, question: body.question, mode: 'steer', targetRequestId: active, createdAt: 1, status: 'pending'};
+      return Response.json({message: pending, state: {revision: 2, activeRequestId: active, pending: [pending]}});
+    }
+    if (url.includes('/messages/')) return removed.promise;
+    return originalFetch(url, options);
+  });
+  await act(async () => {await h.chat.steer('Correction');});
+  assert.deepEqual(h.chat.pendingMessages, [pending]);
+  assert.equal(h.chat.messages.length, 2);
+  let cancelling;
+  await act(async () => {cancelling = h.chat.cancelPending(pending.id).then(() => 'success', error => error.message);});
+  assert.equal(h.chat.pendingMessages.length, 1);
+  await h.connect();
+  await act(async () => {removed.resolve(Response.json({message: pending, state: {revision: 3, activeRequestId: active, pending: []}}));});
+  assert.match(await cancelling, /会话已切换/);
+  assert.deepEqual(h.chat.pendingMessages, []);
+});
+
+test('unrelated initial queue state does not accept a rejected follow-up or clear its draft', async t => {
+  const h = await setup(t, {resumed: true});
+  await h.connect(); await h.start();
+  let result = 'pending';
+  let submission;
+  await act(async () => { submission = h.chat.followUp('Invalid next').then(() => {result = 'accepted';}, error => {result = error.message;}); });
+  await act(async () => {h.streams[1].event('queue', {revision: 1, activeRequestId: h.chat.activeRequestId, pending: []}); await nextTick();});
+  assert.equal(result, 'pending');
+  await act(async () => {h.streams[1].event('error', {message: 'Cannot queue question'}); h.streams[1].close(); await nextTick(); await submission;});
+  assert.equal(result, 'Cannot queue question');
+  assert.equal(h.chat.messages.length, 2);
+});
+
+test('sending after stop joins outstanding follow-ups and respects their started order', async t => {
+  const h = await setup(t, {resumed: true});
+  await h.connect(); await h.start();
+  let secondAccepted;
+  await act(async () => {secondAccepted = h.chat.followUp('Second question');});
+  const second = JSON.parse(h.requests.filter(request => request.url.endsWith('/ask'))[1].body);
+  const pending = {id: second.requestId, question: 'Second question', mode: 'followUp', createdAt: 1, status: 'pending'};
+  await act(async () => {h.streams[1].event('queue', {revision: 2, activeRequestId: h.chat.activeRequestId, pending: [pending]}); await nextTick(); await secondAccepted;});
+  await act(async () => {h.chat.stop();});
+  assert.equal(h.chat.streaming, false);
+  let thirdAccepted;
+  await act(async () => {thirdAccepted = h.chat.send('Third question');});
+  const third = JSON.parse(h.requests.filter(request => request.url.endsWith('/ask'))[2].body);
+  assert.equal(third.mode, 'followUp');
+  assert.deepEqual(h.chat.messages.map(message => message.content), ['First user question', '']);
+  await act(async () => {
+    h.streams[1].event('started', {requestId: second.requestId, question: 'Second question'});
+    h.streams[1].event('text', {delta: 'Second partial'}); await nextTick();
+  });
+  assert.equal(h.chat.activeRequestId, second.requestId);
+  await h.finish(1, 'Second answer');
+  await act(async () => {
+    h.streams[2].event('started', {requestId: third.requestId, question: 'Third question'});
+    h.streams[2].event('text', {delta: 'Third partial'}); await nextTick(); await thirdAccepted;
+  });
+  assert.equal(h.chat.activeRequestId, third.requestId);
+  await h.finish(2, 'Third answer');
+  assert.deepEqual(h.chat.messages.map(message => message.content), ['First user question', '', 'Second question', 'Second answer', 'Third question', 'Third answer']);
+});
+
+test('late done finalizes its own canonical answer and identity after the next stream starts', async t => {
+  const h = await setup(t, {resumed: true});
+  await h.connect(); await h.start();
+  let accepted;
+  await act(async () => {accepted = h.chat.followUp('Next question');});
+  const next = JSON.parse(h.requests.filter(request => request.url.endsWith('/ask'))[1].body);
+  await act(async () => {
+    h.streams[0].event('text', {delta: 'First partial'}); await nextTick();
+    h.streams[1].event('started', {requestId: next.requestId, question: 'Next question'});
+    h.streams[1].event('text', {delta: 'Next partial'}); await nextTick(); await accepted;
+    h.streams[0].event('done', {answer: 'First canonical', answerId: 'first-answer', answerVersion: 'v1', source: 'model'}); await nextTick();
+  });
+  assert.equal(h.chat.messages[1].content, 'First canonical');
+  assert.equal(h.chat.messages[1].answerId, 'first-answer');
+  assert.equal(h.chat.messages[1].answerVersion, 'v1');
+  assert.equal(h.chat.messages[1].streaming, false);
+  assert.equal(h.chat.activeRequestId, next.requestId);
+  assert.equal(h.chat.streaming, true);
+  await act(async () => {h.streams[0].close(); await nextTick();});
+  assert.equal(h.chat.streaming, true);
+  await act(async () => {h.streams[1].event('done', {answer: 'Next canonical', answerId: 'next-answer'}); h.streams[1].close(); await nextTick();});
+  assert.equal(h.chat.messages[1].answerId, 'first-answer');
+  assert.equal(h.chat.messages[3].content, 'Next canonical');
+  assert.equal(h.chat.messages[3].answerId, 'next-answer');
+});
+
+test('late error belongs to the previous reply while the next stream keeps running', async t => {
+  const h = await setup(t, {resumed: true});
+  await h.connect(); await h.start();
+  let accepted;
+  await act(async () => {accepted = h.chat.followUp('Next question');});
+  const next = JSON.parse(h.requests.filter(request => request.url.endsWith('/ask'))[1].body);
+  await act(async () => {
+    h.streams[1].event('started', {requestId: next.requestId, question: 'Next question'}); await nextTick(); await accepted;
+    h.streams[0].event('error', {message: 'First failed'}); await nextTick();
+  });
+  assert.equal(h.chat.messages[1].error, 'First failed');
+  assert.equal(h.chat.messages[1].streaming, false);
+  assert.equal(h.chat.messages[3].error, undefined);
+  assert.equal(h.chat.activeRequestId, next.requestId);
+  assert.equal(h.chat.streaming, true);
+  await act(async () => {h.streams[0].close(); await nextTick();});
+  assert.equal(h.chat.streaming, true);
+  await h.finish(1, 'Next answer');
+  assert.equal(h.chat.messages[3].content, 'Next answer');
+});
+
+test('a wholly delayed earlier queued stream stays before the newer active stream without taking ownership', async t => {
+  const h = await setup(t, {resumed: true});
+  await h.connect(); await h.start();
+  let bAccepted, cAccepted;
+  await act(async () => {bAccepted = h.chat.followUp('B question'); cAccepted = h.chat.followUp('C question');});
+  const asks = h.requests.filter(request => request.url.endsWith('/ask')).map(request => JSON.parse(request.body));
+  await h.finish(0, 'A answer');
+  await act(async () => {
+    h.streams[2].event('started', {requestId: asks[2].requestId, question: 'C question', revision: 8});
+    h.streams[2].event('text', {delta: 'C partial'}); await nextTick(); await cAccepted;
+    h.streams[1].event('queue', {revision: 5, activeRequestId: asks[1].requestId, pending: [{id: asks[2].requestId, question: 'C question', mode: 'followUp', createdAt: 1, status: 'pending'}]});
+    h.streams[1].event('started', {requestId: asks[1].requestId, question: 'B question', revision: 6});
+    h.streams[1].event('thinking', {delta: 'B thinking'});
+    h.streams[1].event('tool', {name: 'read', phase: 'start'});
+    h.streams[1].event('tool', {name: 'read', phase: 'end', isError: false});
+    h.streams[1].event('text', {delta: 'B partial'});
+    h.streams[1].event('done', {answer: 'B canonical', answerId: 'B-answer'});
+    h.streams[1].close(); await nextTick(); await bAccepted;
+  });
+  assert.deepEqual(h.chat.messages.map(message => message.content).slice(0, 5), ['First user question', 'A answer', 'B question', 'B canonical', 'C question']);
+  assert.equal(h.chat.messages[3].thinking, 'B thinking');
+  assert.deepEqual(h.chat.messages[3].tools, [{name: 'read', args: undefined, isError: false}]);
+  assert.equal(h.chat.messages[3].answerId, 'B-answer');
+  assert.equal(h.chat.messages[3].streaming, false);
+  assert.equal(h.chat.activeRequestId, asks[2].requestId);
+  assert.equal(h.chat.streaming, true);
+  const originalFetch = globalThis.fetch;
+  let steeringTarget;
+  t.mock.method(globalThis, 'fetch', (url, options) => {
+    if (!url.endsWith('/steer')) return originalFetch(url, options);
+    const input = JSON.parse(options.body);
+    steeringTarget = input.targetRequestId;
+    const message = {id: input.requestId, question: input.question, mode: 'steer', targetRequestId: input.targetRequestId, createdAt: 1, status: 'pending'};
+    return Promise.resolve(Response.json({message, state: {revision: 9, activeRequestId: asks[2].requestId, pending: [message]}}));
+  });
+  await act(async () => {await h.chat.steer('C correction');});
+  assert.equal(steeringTarget, asks[2].requestId);
+  await act(async () => {h.chat.stop();});
+  assert.equal(h.streams[2].signal.aborted, true);
+  assert.equal(h.chat.messages.at(-1).stopped, true);
+});
+
+test('an earlier started revision cannot revive active controls after the newer request completes', async t => {
+  const h = await setup(t, {resumed: true});
+  await h.connect(); await h.start();
+  let bAccepted, cAccepted;
+  await act(async () => {bAccepted = h.chat.followUp('B question'); cAccepted = h.chat.followUp('C question');});
+  const asks = h.requests.filter(request => request.url.endsWith('/ask')).map(request => JSON.parse(request.body));
+  await h.finish(0, 'A answer');
+  await act(async () => {h.streams[2].event('started', {requestId: asks[2].requestId, question: 'C question', revision: 8}); await nextTick(); await cAccepted;});
+  await act(async () => {h.streams[2].event('done', {answer: 'C canonical', answerId: 'C-answer'}); h.streams[2].close(); await nextTick();});
+  await act(async () => {
+    h.streams[1].event('started', {requestId: asks[1].requestId, question: 'B question', revision: 6});
+    h.streams[1].event('text', {delta: 'B partial'}); await nextTick(); await bAccepted;
+  });
+  assert.equal(h.chat.activeRequestId, null);
+  assert.equal(h.chat.streaming, false);
+  await act(async () => {h.streams[1].event('done', {answer: 'B canonical', answerId: 'B-answer'}); h.streams[1].close(); await nextTick();});
+  assert.deepEqual(h.chat.messages.map(message => message.content), ['First user question', 'A answer', 'B question', 'B canonical', 'C question', 'C canonical']);
+  assert.equal(h.chat.messages[3].answerId, 'B-answer');
+  assert.equal(h.chat.messages[5].answerId, 'C-answer');
+});
+
+test('late steering and following deltas stay inside the original request group before its successor', async t => {
+  const h = await setup(t, {resumed: true});
+  await h.connect(); await h.start();
+  const first = h.chat.activeRequestId;
+  let accepted;
+  await act(async () => {accepted = h.chat.followUp('B question');});
+  const next = JSON.parse(h.requests.filter(request => request.url.endsWith('/ask'))[1].body);
+  await act(async () => {
+    h.streams[0].event('started', {requestId: first, question: 'First user question', revision: 2});
+    h.streams[0].event('text', {delta: 'A before correction'}); await nextTick();
+    h.streams[1].event('started', {requestId: next.requestId, question: 'B question', revision: 6}); await nextTick(); await accepted;
+    h.streams[0].event('steering_applied', {requestId: 'correction', question: 'A correction', targetRequestId: first});
+    h.streams[0].event('thinking', {delta: 'A corrected thinking'});
+    h.streams[0].event('text', {delta: 'A corrected partial'});
+    h.streams[0].event('done', {answer: 'A corrected canonical', answerId: 'A-final'}); h.streams[0].close(); await nextTick();
+  });
+  assert.deepEqual(h.chat.messages.map(message => message.content).slice(0, 5), ['First user question', 'A before correction', 'A correction', 'A corrected canonical', 'B question']);
+  assert.equal(h.chat.messages[1].answerId, undefined);
+  assert.equal(h.chat.messages[3].answerId, 'A-final');
+  assert.equal(h.chat.messages[3].thinking, 'A corrected thinking');
+  assert.equal(h.chat.activeRequestId, next.requestId);
+  assert.equal(h.chat.streaming, true);
+  await h.finish(1, 'B canonical');
+});
+
+test('offline speculative sends do not outrank recovered authoritative starts or reorder failed history', async t => {
+  const h = await setup(t, {resumed: true});
+  await h.connect();
+  const originalStreamFetch = window.fetch;
+  t.mock.method(window, 'fetch', async () => {throw new Error('offline');});
+  for (let index = 1; index <= 6; index++) {
+    await act(async () => {await h.chat.send(`Offline ${index}`);});
+  }
+  const failedHistory = h.chat.messages.map(message => ({id: message.id, content: message.content, error: message.error}));
+  assert.equal(failedHistory.length, 12);
+  assert.equal(failedHistory[1].error, 'offline');
+  t.mock.method(window, 'fetch', originalStreamFetch);
+  let aCompleted, bAccepted;
+  await act(async () => {aCompleted = h.chat.send('Recovered A');});
+  const a = JSON.parse(h.requests.filter(request => request.url.endsWith('/ask')).at(-1).body);
+  await act(async () => {h.streams[0].event('started', {requestId: a.requestId, question: 'Recovered A', revision: 2}); await nextTick();});
+  await act(async () => {bAccepted = h.chat.followUp('Recovered B');});
+  const b = JSON.parse(h.requests.filter(request => request.url.endsWith('/ask')).at(-1).body);
+  await act(async () => {
+    h.streams[1].event('started', {requestId: b.requestId, question: 'Recovered B', revision: 5});
+    h.streams[1].event('text', {delta: 'B partial'});
+    h.streams[0].event('done', {answer: 'A canonical', answerId: 'A-answer'});
+    h.streams[0].close(); await nextTick(); await bAccepted; await aCompleted;
+  });
+  assert.equal(h.chat.activeRequestId, b.requestId);
+  assert.equal(h.chat.streaming, true);
+  assert.deepEqual(h.chat.messages.slice(0, 12).map(message => ({id: message.id, content: message.content, error: message.error})), failedHistory);
+  assert.deepEqual(h.chat.messages.slice(12, 15).map(message => message.content), ['Recovered A', 'A canonical', 'Recovered B']);
+  assert.equal(h.chat.messages[13].answerId, 'A-answer');
+  const originalFetch = globalThis.fetch;
+  let steeringTarget;
+  t.mock.method(globalThis, 'fetch', (url, options) => {
+    if (!url.endsWith('/steer')) return originalFetch(url, options);
+    const input = JSON.parse(options.body); steeringTarget = input.targetRequestId;
+    const message = {id: input.requestId, question: input.question, mode: 'steer', targetRequestId: input.targetRequestId, createdAt: 1, status: 'pending'};
+    return Promise.resolve(Response.json({message, state: {revision: 6, activeRequestId: b.requestId, pending: [message]}}));
+  });
+  await act(async () => {await h.chat.steer('B correction');});
+  assert.equal(steeringTarget, b.requestId);
+  await act(async () => {h.chat.stop();});
+  assert.equal(h.streams[1].signal.aborted, true);
+  assert.equal(h.chat.messages[15].stopped, true);
+  assert.equal(h.chat.messages[15].content, 'B partial');
+  assert.equal(h.chat.streaming, false);
+});

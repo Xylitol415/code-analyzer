@@ -3,11 +3,34 @@ import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { ControlledSkillResourceLoader, attachSessionSkills, createPrepareSkillImportTool, getSessionSkills } from "../src/skills/runtime.ts";
+import { ControlledSkillResourceLoader, attachSessionSkills, createPrepareSkillImportTool, getSessionSkills, prepareSessionSkillSteering, applySessionSkillSteering } from "../src/skills/runtime.ts";
 import { runAsk } from "../src/ask.ts";
 
 const snapshot = (revision = 1, skills = []) => ({ projectPath: "/project", revision, skills });
 const skill = { id: "one", name: "only-explicit", description: "secret description", version: "hash", source: { kind: "file", label: "SKILL.md" }, disableModelInvocation: true, files: [], installedAt: "now", filePath: "/managed/SKILL.md", baseDir: "/managed" };
+
+test("steering expands only the current skill snapshot and authorizes URLs only after adoption", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "steering-skill-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const filePath = join(directory, "SKILL.md");
+  await writeFile(filePath, "---\nname: only-explicit\ndescription: test\n---\nUse source evidence.");
+  const loader = new ControlledSkillResourceLoader("/project", "/missing", "", snapshot(1, [{ ...skill, filePath, baseDir: directory }]));
+  const session = { getActiveToolNames: () => [], setActiveToolsByName() { throw Error("must not refresh tools mid-turn"); }, sessionManager: { appendCustomEntry() {} } };
+  attachSessionSkills(session, loader, { snapshot: async () => { throw Error("must not refresh snapshot mid-turn"); } });
+  loader.beginTurn("https://example.com/first");
+  const question = "/skill:only-explicit Explain https://example.com/second";
+  const expanded = prepareSessionSkillSteering(session, question);
+  assert.match(expanded, /<skill name="only-explicit"/);
+  assert.match(expanded, /Use source evidence/);
+  assert.doesNotMatch(expanded, /description: test/);
+  assert.equal(loader.allowsURL("https://example.com/second"), false);
+  applySessionSkillSteering(session, question);
+  assert.equal(loader.allowsURL("https://example.com/first"), true);
+  assert.equal(loader.allowsURL("https://example.com/second"), true);
+  assert.throws(() => prepareSessionSkillSteering(session, "/skill:missing hello"), /未启用/);
+  loader.endTurn();
+  assert.equal(loader.allowsURL("https://example.com/second"), false);
+});
 
 test("controlled loader preserves AGENTS and never discovers local skills/extensions/packages", async (t) => {
   const project = await mkdtemp(join(tmpdir(), "skills-loader-"));
