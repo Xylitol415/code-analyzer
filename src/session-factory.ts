@@ -5,6 +5,8 @@ import {
   SessionManager,
   type AgentSession,
 } from "@earendil-works/pi-coding-agent";
+import { attachSessionMemory } from "./memory/runtime.js";
+import { getMemoryService } from "./memory/service.js";
 import { attachSessionSkills, ControlledSkillResourceLoader, createPrepareSkillImportTool } from "./skills/runtime.js";
 import { getSkillService } from "./skills/service.js";
 import { createGitReadonlyTool } from "./git-tool.js";
@@ -126,6 +128,10 @@ export async function createReadOnlySession(
   });
 
   attachSessionSkills(session, resourceLoader, skillService);
+  // Native I/O is lazy and worker-owned. Unsupported Node versions and the
+  // explicit opt-out retain the ordinary session lifecycle.
+  const memory = getMemoryService();
+  if (memory) attachSessionMemory(session, { projectPath, service: memory });
 
   const sessionKey = selection.llm ? selection.llm.apiKey : env.apiKey;
   if (sessionKey) {

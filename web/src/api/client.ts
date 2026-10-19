@@ -1,3 +1,4 @@
+import type { FeedbackInput, FeedbackResult, KnowledgeItem, MemoryLibrary, ReviewInput } from "../types";
 import { fetchEventSource } from "@microsoft/fetch-event-source";
 import type { ChatMessage, SseEventName, SkillLibrary, SkillPreview, SkillSnapshot, SkillConfirmation } from "../types";
 
@@ -130,11 +131,12 @@ export function askStream(
   question: string,
   signal: AbortSignal,
   onEvent: (event: SseEventName, data: unknown) => void,
+  options?: { requestId?: string; reuse?: "auto" | "bypass" },
 ): Promise<void> {
   return fetchEventSource(`${config.baseUrl}/sessions/${sessionId}/ask`, {
     method: "POST",
     headers: authHeaders(config),
-    body: JSON.stringify({ question }),
+    body: JSON.stringify({ question, ...options }),
     signal,
     openWhenHidden: true,
     async onopen(response) {
@@ -195,6 +197,36 @@ export async function patchSkill(
 ): Promise<SkillSnapshot> {
   const response = await fetch(`${config.baseUrl}/skills/${encodeURIComponent(id)}`, {
     method: "PATCH", headers: authHeaders(config), body: JSON.stringify({ project, enabled, ...(version ? { version } : {}) }),
+  });
+  if (!response.ok) throw await responseError(response);
+  return response.json();
+}
+
+
+export async function listKnowledge(config: ServerConfig, project: string, state = "candidate", limit = 20, offset = 0): Promise<MemoryLibrary> {
+  return memoryRequest(config, `/memory/knowledge?project=${encodeURIComponent(project)}&state=${encodeURIComponent(state)}&limit=${limit}&offset=${offset}`);
+}
+export async function getKnowledge(config: ServerConfig, id: string): Promise<KnowledgeItem> {
+  return memoryRequest(config, `/memory/knowledge/${encodeURIComponent(id)}`);
+}
+export async function collectAnswer(config: ServerConfig, answerId: string): Promise<KnowledgeItem> {
+  return memoryRequest(config, "/memory/knowledge", "POST", { answerId });
+}
+export async function putFeedback(config: ServerConfig, answerId: string, input: FeedbackInput): Promise<FeedbackResult> {
+  return memoryRequest(config, `/memory/answers/${encodeURIComponent(answerId)}/feedback`, "PUT", input);
+}
+export async function getFeedback(config: ServerConfig, answerId: string, clientId: string): Promise<FeedbackResult> {
+  return memoryRequest(config, `/memory/answers/${encodeURIComponent(answerId)}/feedback?clientId=${encodeURIComponent(clientId)}`);
+}
+export async function previewKnowledgeEvidence(config: ServerConfig, id: string, input: { expectedRevision: number; expectedSourceKey: string; evidence: import("../types").SourceEvidenceInput[] }): Promise<{ snapshot: import("../types").SourceSnapshot; evidence: import("../types").SourceEvidence[] }> {
+  return memoryRequest(config, `/memory/knowledge/${encodeURIComponent(id)}/evidence`, "POST", input);
+}
+export async function reviewKnowledge(config: ServerConfig, id: string, input: ReviewInput): Promise<KnowledgeItem> {
+  return memoryRequest(config, `/memory/knowledge/${encodeURIComponent(id)}/review`, "POST", input);
+}
+async function memoryRequest<T>(config: ServerConfig, path: string, method = "GET", input?: unknown): Promise<T> {
+  const response = await fetch(`${config.baseUrl}${path}`, {
+    method, headers: authHeaders(config), ...(input === undefined ? {} : { body: JSON.stringify(input) }),
   });
   if (!response.ok) throw await responseError(response);
   return response.json();

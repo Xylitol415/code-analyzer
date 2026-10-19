@@ -60,6 +60,7 @@ export interface ConfigBarProps {
   onConnect: () => Promise<boolean>;
   onNewSession: () => void;
   skillsControl?: ReactNode;
+  knowledgeControl?: ReactNode;
 }
 
 export function ConfigBar(props: ConfigBarProps) {
@@ -153,6 +154,7 @@ export function ConfigBar(props: ConfigBarProps) {
         </div>
         <div className="session-actions">
           {props.skillsControl}
+          {props.knowledgeControl}
           <span className={`session-status ${props.connected ? "is-connected" : ""}`}
             title={props.connected ? "已连接" : "未连接"}>
             <span aria-hidden="true" />{props.connected ? "已连接" : "未连接"}

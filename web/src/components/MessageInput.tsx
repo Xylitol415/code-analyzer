@@ -5,18 +5,20 @@ import { SendIcon, StopIcon } from "./Icons";
 export interface MessageInputProps {
   disabled: boolean;
   streaming: boolean;
-  onSend: (text: string) => void;
+  sendingBlocked?: boolean;
+  onSend: (text: string, reuse?: "auto" | "bypass") => void;
   onStop: () => void;
 }
 
 export function MessageInput(props: MessageInputProps) {
+  const [bypass, setBypass] = useState(false);
   const [value, setValue] = useState("");
   const ref = useRef<HTMLTextAreaElement>(null);
 
   const submit = () => {
     const t = value.trim();
-    if (!t || props.disabled || props.streaming) return;
-    props.onSend(t);
+    if (!t || props.disabled || props.sendingBlocked || props.streaming) return;
+    props.onSend(t, bypass ? "bypass" : "auto");
     setValue("");
     if (ref.current) ref.current.style.height = "auto";
   };
@@ -31,6 +33,7 @@ export function MessageInput(props: MessageInputProps) {
       <div className="mx-auto flex max-w-5xl items-end gap-2">
         <textarea
           ref={ref}
+          aria-label="提问内容"
           rows={1}
           value={value}
           placeholder={
@@ -55,12 +58,13 @@ export function MessageInput(props: MessageInputProps) {
             停止
           </Button>
         ) : (
-          <Button onClick={submit} disabled={props.disabled || !value.trim()}>
+          <Button onClick={submit} disabled={props.disabled || props.sendingBlocked || !value.trim()}>
             <SendIcon className="h-4 w-4" />
             发送
           </Button>
         )}
       </div>
+      <label className="mx-auto mt-2 flex max-w-5xl items-center gap-2 text-xs text-slate-500"><input type="checkbox" checked={bypass} onChange={(event) => setBypass(event.target.checked)} disabled={props.disabled || props.streaming} />本次跳过知识复用</label>
     </div>
   );
 }

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { CheckIcon } from "./Icons";
+import { ReplyActionButton } from "./ReplyActionButton";
 
 type CopyStatus = "idle" | "copying" | "copied" | "error";
 
@@ -53,10 +54,10 @@ export function CopyReplyButton({ content }: { content: string }) {
   };
 
   return (
-    <div className="mt-2 flex items-center gap-2">
-      <button type="button" aria-label="复制回复" title={status === "copied" ? "已复制" : "复制 Markdown 原文"}
-        disabled={status === "copying"} onClick={copy}
-        className="inline-flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-md border-0 bg-transparent p-1.5 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-500 disabled:cursor-wait disabled:opacity-50">
+    // Keep the absolute screen-reader status inside the chat scroller's clip.
+    <div className="relative flex items-center gap-2">
+      <ReplyActionButton label="复制回复" tooltip={status === "copied" ? "已复制" : "复制 Markdown 原文"}
+        disabled={status === "copying"} onClick={copy}>
         {status === "copied" ? (
           <span aria-hidden="true"><CheckIcon className="h-4 w-4 text-emerald-600" /></span>
         ) : (
@@ -66,8 +67,8 @@ export function CopyReplyButton({ content }: { content: string }) {
             <path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h3" />
           </svg>
         )}
-      </button>
-      <span role="status" aria-live="polite" className={`text-xs ${status === "error" ? "text-rose-600" : "text-slate-500"}`}>
+      </ReplyActionButton>
+      <span role="status" aria-live="polite" className={status === "error" ? "max-w-xs text-xs text-rose-600" : "sr-only"}>
         {status === "copied" ? "已复制" : status === "error" ? error : ""}
       </span>
     </div>

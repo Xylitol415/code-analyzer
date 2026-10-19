@@ -104,6 +104,7 @@ async function setup(t, sessionResponse = {}) {
       await act(async () => { root.update(React.createElement(Harness, { serverConfig })); });
     },
     async connect() { await act(async () => { await chat.connect("/project", false); }); },
+    async start() { await act(async () => { void chat.send("First user question"); }); },
     async finish(index, answer) {
       await act(async () => {
         streams[index].event("done", { answer });
@@ -117,6 +118,7 @@ async function setup(t, sessionResponse = {}) {
 test("new session deletes the previous server session and aborts its stream", async (t) => {
   const h = await setup(t);
   await h.connect();
+  await h.start();
   await act(async () => { h.chat.newSession(); });
   assert.equal(h.sessions.size, 0);
   assert.equal(h.streams[0].signal.aborted, true);
@@ -128,6 +130,7 @@ test("new session deletes the previous server session and aborts its stream", as
 test("reconnecting releases the previous session", async (t) => {
   const h = await setup(t);
   await h.connect();
+  await h.start();
   await h.connect();
   assert.deepEqual([...h.sessions], ["session-2"]);
   assert.equal(h.streams[0].signal.aborted, true);
@@ -180,24 +183,26 @@ test("only the latest overlapping connection can become active", async (t) => {
   await act(async () => { h.pendingCreates[0].finish(); await first; });
   assert.equal(h.chat.sessionId, "session-2");
   assert.deepEqual([...h.sessions], ["session-2"]);
-  assert.equal(h.streams.length, 1);
+  assert.equal(h.streams.length, 0);
 });
 
 test("stopping before the first reply marks the message stopped and aborts the request", async (t) => {
   const h = await setup(t);
   await h.connect();
+  await h.start();
   await act(async () => { h.chat.stop(); });
   assert.equal(h.streams[0].signal.aborted, true);
   assert.equal(h.chat.streaming, false);
-  assert.equal(h.chat.messages[0].streaming, false);
-  assert.equal(h.chat.messages[0].stopped, true);
-  assert.equal(h.chat.messages[0].content, "");
-  assert.equal(h.chat.messages[0].error, undefined);
+  assert.equal(h.chat.messages[2].streaming, false);
+  assert.equal(h.chat.messages[2].stopped, true);
+  assert.equal(h.chat.messages[2].content, "");
+  assert.equal(h.chat.messages[2].error, undefined);
 });
 
 test("stopped stream completion and late events cannot alter a replacement stream", async (t) => {
   const h = await setup(t);
   await h.connect();
+  await h.start();
   await act(async () => {
     h.streams[0].event("text", { delta: "partial answer" });
     h.streams[0].event("thinking", { delta: "partial thinking" });
@@ -230,25 +235,24 @@ test("stopped stream completion and late events cannot alter a replacement strea
   assert.equal(h.chat.messages.at(-1).error, undefined);
   assert.equal(h.chat.messages.at(-1).streaming, false);
   assert.notEqual(h.chat.messages.at(-1).stopped, true);
-  assert.equal(h.chat.messages[0].content, "partial answer");
-  assert.equal(h.chat.messages[0].thinking, "partial thinking");
-  assert.deepEqual(h.chat.messages[0].tools, [{ name: "read", args: { path: "index.ts" } }]);
-  assert.equal(h.chat.messages[0].error, undefined);
-  assert.equal(h.chat.messages[0].streaming, false);
-  assert.equal(h.chat.messages[0].stopped, true);
+  assert.equal(h.chat.messages[2].content, "partial answer");
+  assert.equal(h.chat.messages[2].thinking, "partial thinking");
+  assert.deepEqual(h.chat.messages[2].tools, [{ name: "read", args: { path: "index.ts" } }]);
+  assert.equal(h.chat.messages[2].error, undefined);
+  assert.equal(h.chat.messages[2].streaming, false);
+  assert.equal(h.chat.messages[2].stopped, true);
 });
 
 test("questions and cleanup use the configuration that created the session", async (t) => {
   const h = await setup(t);
   await h.connect();
-  await h.finish(0, "hello");
   await h.render({ baseUrl: "http://second.test", token: "second-token" });
   let question;
   await act(async () => { question = h.chat.send("where is the code?"); });
-  await h.finish(1, "here");
+  await h.finish(0, "here");
   await question;
   await act(async () => { h.chat.newSession(); });
-  const questionRequest = h.requests.filter((request) => request.url.endsWith("/ask"))[1];
+  const questionRequest = h.requests.filter((request) => request.url.endsWith("/ask"))[0];
   const deletion = h.requests.find((request) => request.method === "DELETE");
   assert.equal(questionRequest.url, "http://first.test/sessions/session-1/ask");
   assert.equal(questionRequest.headers.Authorization, "Bearer first-token");
@@ -259,6 +263,7 @@ test("questions and cleanup use the configuration that created the session", asy
 test("unmount releases the active server session", async (t) => {
   const h = await setup(t);
   await h.connect();
+  await h.start();
   await h.unmount();
   assert.equal(h.sessions.size, 0);
   assert.equal(h.streams[0].signal.aborted, true);
@@ -267,6 +272,7 @@ test("unmount releases the active server session", async (t) => {
 test("page refresh releases its backend session with original authentication and aborts the stream", async (t) => {
   const h = await setup(t);
   await h.connect();
+  await h.start();
   await h.render({ baseUrl: "http://edited.test", token: "edited-token" });
   await h.pageEvent("pagehide");
   assert.equal(h.sessions.size, 0, "refresh must release the historical session's active lock");
@@ -298,6 +304,7 @@ test("returning from the back-forward cache clears the released connection and l
 test("manual disconnect affects only the exact backend session and clears its current UI", async (t) => {
   const h = await setup(t);
   await h.connect();
+  await h.start();
   await act(async () => { await h.chat.disconnect("session-1", { baseUrl: "http://other.test", token: "other-token" }); });
   assert.equal(h.chat.sessionId, "session-1", "an equal ID on another backend is not the current session");
   assert.equal(h.streams[0].signal.aborted, false);
@@ -337,6 +344,7 @@ const skillPreview = {
 test("skill events track the actual session project, ignore another project and retain confirmation cards after completion", async (t) => {
   const h = await setup(t, { projectPath: "/canonical/project", skillsRevision: 2, skills: [] });
   await h.connect();
+  await h.start();
   assert.equal(h.chat.projectPath, "/canonical/project");
   assert.deepEqual(h.chat.activeConfig, config);
   assert.equal(h.chat.skillsRevision, 2);
@@ -350,7 +358,7 @@ test("skill events track the actual session project, ignore another project and 
   await h.finish(0, "Please confirm");
   assert.equal(h.chat.skillsRevision, 3);
   assert.equal(h.chat.skills.length, 1);
-  assert.deepEqual(h.chat.messages[0].skillPreviews, [skillPreview]);
+  assert.deepEqual(h.chat.messages[2].skillPreviews, [skillPreview]);
   await act(async () => { h.chat.newSession(); });
   assert.equal(h.chat.projectPath, null);
   assert.equal(h.chat.activeConfig, null);
@@ -394,6 +402,7 @@ test("conversation confirmation uses its original backend and a late confirmatio
 test("successful conversation confirmation preserves the preview and records confirmed status without inventing applied revision", async (t) => {
   const h = await setup(t, { projectPath: "/canonical/project" });
   await h.connect();
+  await h.start();
   await act(async () => { h.streams[0].event("skill_preview", skillPreview); await nextTick(); });
   const originalFetch = globalThis.fetch;
   t.mock.method(globalThis, "fetch", (url, options) => url.includes("/confirm")
@@ -401,6 +410,53 @@ test("successful conversation confirmation preserves the preview and records con
     : originalFetch(url, options));
   await act(async () => { await h.chat.confirmSkillPreview(skillPreview); });
   await h.finish(0, "ready");
-  assert.deepEqual(h.chat.messages[0].confirmedSkillPreviews, [skillPreview.id]);
+  assert.deepEqual(h.chat.messages[2].confirmedSkillPreviews, [skillPreview.id]);
   assert.equal(h.chat.skillsRevision, 0);
+});
+
+test("fresh sessions show a local welcome without consuming a model turn", async (t) => {
+  const h = await setup(t);
+  await h.connect();
+  assert.equal(h.streams.length, 0);
+  assert.equal(h.chat.streaming, false);
+  assert.equal(h.chat.messages.length, 1);
+  assert.equal(h.chat.messages[0].role, "assistant");
+  assert.match(h.chat.messages[0].content, /代码/);
+  assert.equal(h.chat.messages[0].answerId, undefined);
+});
+
+test("done preserves backend answer identity and a stable request id with bypass", async (t) => {
+  const h = await setup(t, { resumed: true });
+  await h.connect();
+  let question;
+  await act(async () => { question = h.chat.send("Question", "bypass"); });
+  const request = h.requests.find((item) => item.url.endsWith("/ask"));
+  assert.match(JSON.parse(request.body).requestId ?? "", /^[0-9a-f-]{36}$/);
+  assert.equal(JSON.parse(request.body).reuse, "bypass");
+  const metadata = { answerId: "server-answer", answerVersion: "v1", source: "exact", knowledgeIds: ["k1"], usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, quality: "no-model-call" } };
+  await act(async () => { h.streams[0].event("done", { answer: "Canonical", ...metadata }); h.streams[0].close(); await nextTick(); });
+  await question;
+  assert.equal(h.chat.messages.at(-1).content, "Canonical");
+  for (const [key, value] of Object.entries(metadata)) assert.deepEqual(h.chat.messages.at(-1)[key], value);
+});
+
+test("stale context blocks later asks and starts fresh on the active backend without carrying answers", async (t) => {
+  const h = await setup(t, { resumed: true });
+  await h.connect();
+  let question;
+  await act(async () => { question = h.chat.send("Question"); });
+  await act(async () => { h.streams[0].event("error", { message: "Code changed", code: "context_stale" }); h.streams[0].close(); await nextTick(); });
+  await question;
+  assert.equal(h.chat.contextStale, true);
+  await act(async () => { await h.chat.send("Cannot continue"); });
+  assert.equal(h.streams.length, 1);
+  assert.match(h.chat.messages.at(-1).error, /Code changed/);
+  await h.render({ baseUrl: "http://draft.test", token: "draft" });
+  await act(async () => { await h.chat.restartSession(); });
+  const creates = h.requests.filter((item) => item.url.endsWith("/sessions"));
+  assert.equal(creates.at(-1).url, "http://first.test/sessions");
+  assert.equal(creates.at(-1).headers.Authorization, "Bearer first-token");
+  assert.equal(JSON.parse(creates.at(-1).body).project, "/project");
+  assert.equal(h.chat.contextStale, false);
+  assert.equal(h.chat.messages.some((item) => item.content === "Question"), false);
 });

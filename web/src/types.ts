@@ -1,3 +1,5 @@
+import type { AnswerMetadata } from "../../src/memory/types";
+export type { AnswerMetadata, AnswerSource, FeedbackInput, FeedbackResult, FeedbackReason, KnowledgeItem, MemoryLibrary, ReviewInput, SourceEvidenceInput, SourceEvidence, SourceSnapshot } from "../../src/memory/types";
 import type { SkillPreview } from "../../src/skills/types";
 export type { SkillPreview, SkillVersion, SkillLibrary, SkillSnapshot, SkillConfirmation, SkillPatch } from "../../src/skills/types";
 
@@ -22,4 +24,10 @@ export interface ChatMessage {
   streaming: boolean;
   /** 用户主动停止；已接收的正文、思考和工具记录仍保留。 */
   stopped?: boolean;
+  answerId?: AnswerMetadata["answerId"];
+  answerVersion?: AnswerMetadata["answerVersion"];
+  source?: AnswerMetadata["source"];
+  knowledgeIds?: AnswerMetadata["knowledgeIds"];
+  usage?: AnswerMetadata["usage"];
+  stale?: boolean;
 }

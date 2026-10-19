@@ -1,11 +1,13 @@
+import { AnswerFeedback } from "./AnswerFeedback";
+import type { ServerConfig } from "../api/client";
 import type { ChatMessage as Msg, ToolCall, SkillPreview } from "../types";
 import { Markdown } from "./Markdown";
 import { CopyReplyButton } from "./CopyReplyButton";
-import { ChevronDownIcon, RobotAvatar, StopIcon, UserAvatar } from "./Icons";
+import { BookOpenIcon, ChevronDownIcon, RobotAvatar, StopIcon, UserAvatar } from "./Icons";
 import { SkillPreviewCard } from "./SkillPreviewCard";
 import { Spinner } from "./Spinner";
 
-export function ChatMessage({ message, onConfirmSkill }: { message: Msg; onConfirmSkill?: (preview: SkillPreview) => Promise<void> }) {
+export function ChatMessage({ message, onConfirmSkill, config }: { config?: ServerConfig; message: Msg; onConfirmSkill?: (preview: SkillPreview) => Promise<void> }) {
   if (message.role === "user") {
     return (
       <div className="flex justify-end gap-3 px-4 py-3">
@@ -54,6 +56,8 @@ export function ChatMessage({ message, onConfirmSkill }: { message: Msg; onConfi
           </div>
         )}
 
+        {message.source && <p className="mb-2 inline-flex items-center gap-1.5 rounded-md bg-indigo-50 px-2 py-1 text-[11px] text-indigo-700">{message.source !== "generated" && <BookOpenIcon className="h-3.5 w-3.5" />}{{ generated: "模型分析", exact: "已审核知识直接复用", assisted: "参考已审核知识分析" }[message.source]}</p>}
+
         {hasContent ? (
           <div className="markdown-body">
             <Markdown streaming={message.streaming && !message.stopped}>{message.content}</Markdown>
@@ -81,7 +85,9 @@ export function ChatMessage({ message, onConfirmSkill }: { message: Msg; onConfi
         ) : null}
 
         {message.error && <div className="mt-2 text-sm text-red-500">错误：{message.error}</div>}
-        {hasContent && !message.streaming && <CopyReplyButton content={message.content} />}
+        {hasContent && !message.streaming && <div className="mt-2 flex flex-wrap items-start gap-1"><CopyReplyButton content={message.content} />
+          {config && message.answerId && !message.stopped && !message.error && <AnswerFeedback key={`${config.baseUrl}:${config.token}:${message.answerId}`} config={config} answerId={message.answerId} />}
+        </div>}
       </div>
     </div>
   );

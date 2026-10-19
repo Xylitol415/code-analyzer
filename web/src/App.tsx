@@ -5,6 +5,7 @@ import { ConfigBar, type HistoryStatus, type SessionMode, type ModelMode, type M
 import { ChatMessage } from "./components/ChatMessage";
 import { MessageInput } from "./components/MessageInput";
 import { ToastContainer, useToast } from "./components/Toast";
+import { KnowledgeManager } from "./components/KnowledgeManager";
 import { SkillsManager } from "./components/SkillsManager";
 import { SparkleIcon } from "./components/Icons";
 import { CONFIG_HISTORY_KEY, clearConfigurationHistory, loadConfigurationHistory, rememberConfiguration, saveConfigurationHistory, type SavedConfiguration } from "./config-history";
@@ -260,6 +261,7 @@ export default function App() {
         onLlmModelChange={setLlmModel}
         onConnect={handleConnect}
         onNewSession={chat.newSession}
+        knowledgeControl={<KnowledgeManager key={`memory:${skillsBindingKey}`} binding={skillsBinding} />}
         skillsControl={<SkillsManager key={skillsBindingKey} binding={skillsBinding} appliedCount={chat.skills.length} appliedRevision={chat.skillsRevision} />}
       />
 
@@ -271,13 +273,19 @@ export default function App() {
               <p className="text-sm">通过右上角新建会话，或选择历史会话继续分析</p>
             </div>
           ) : (
-            chat.messages.map((m) => <ChatMessage key={m.id} message={m} onConfirmSkill={chat.confirmSkillPreview} />)
+            chat.messages.map((m) => <ChatMessage key={m.id} message={m} config={chat.activeConfig ?? undefined} onConfirmSkill={chat.confirmSkillPreview} />)
           )}
         </div>
       </div>
 
+      {chat.contextStale && <div role="alert" className="border-t border-amber-200 bg-amber-50 px-4 py-3"><div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-3"><div className="text-sm text-amber-900"><p className="font-medium">上下文已过期</p><p className="mt-1 text-xs">代码或已用知识已变化，请新建会话继续。输入框中的草稿会保留，历史记录仍可查看。</p></div><button type="button" disabled={connecting} className="rounded-lg bg-indigo-600 px-3 py-2 text-xs font-medium text-white disabled:opacity-50" onClick={() => {
+        if (connecting) return;
+        setConnecting(true);
+        void chat.restartSession().catch((failure) => show("error", failure instanceof Error ? failure.message : "无法创建新会话")).finally(() => { if (alive.current) setConnecting(false); });
+      }}>新建会话继续</button></div></div>}
       <MessageInput
-        disabled={!chat.sessionId}
+        disabled={!chat.sessionId || connecting}
+        sendingBlocked={chat.contextStale}
         streaming={chat.streaming}
         onSend={chat.send}
         onStop={chat.stop}

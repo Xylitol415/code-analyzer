@@ -19,14 +19,14 @@ function visibleText(node) {
   return node?.children?.map(visibleText).join("") ?? "";
 }
 
-async function setup(t, { openConfig = true, autoRelease = true, storageBlocked = false } = {}) {
+async function setup(t, { openConfig = true, autoRelease = true, storageBlocked = false, staleAsk = false } = {}) {
   const requests = [];
   const timers = new Map();
   let nextTimer = 0;
   t.mock.method(globalThis, "fetch", (url, options = {}) => new Promise((resolve) => {
     requests.push({ url, ...options, reply: (body, status = 200) => resolve(Response.json(body, { status })) });
     if (options.method === "DELETE" && autoRelease) resolve(Response.json({ ok: true }));
-    if (url.endsWith("/ask")) resolve(new Response("", { headers: { "content-type": "text/event-stream" } }));
+    if (url.endsWith("/ask")) resolve(new Response(staleAsk ? `event: error\ndata: {"message":"Code changed","code":"context_stale"}\n\n` : "", { headers: { "content-type": "text/event-stream" } }));
   }));
   const oldWindow = globalThis.window;
   const oldDocument = globalThis.document;
@@ -77,6 +77,9 @@ async function setup(t, { openConfig = true, autoRelease = true, storageBlocked 
       assert.ok(button, `Expected a ${label} button`);
       await act(async () => { void button.props.onClick(); });
     },
+    async openKnowledge() { await act(async () => root.root.findByProps({ "aria-label": "知识库管理" }).props.onClick()); },
+    get messageInput() { return root.root.findAllByType("textarea").find(node => node.props["aria-label"] === "提问内容"); },
+    async inputMessage(value) { await act(async () => harness.messageInput.props.onChange({ target: { value, style: {}, scrollHeight: 40 } })); },
     async openSkills() { await act(async () => { root.root.findByProps({ "aria-label": "Skills 管理" }).props.onClick(); }); },
     async closeSkills() { await act(async () => { root.root.findByProps({ "aria-label": "关闭 Skills" }).props.onClick(); }); },
     async openHistory() { await act(async () => { root.root.findByProps({ "aria-label": "历史会话" }).props.onClick(); }); },
@@ -299,8 +302,8 @@ test("custom OpenAI-compatible sessions submit their own configuration even when
   assert.equal(request.headers.Authorization, "Bearer backend-token");
   await h.reply(h.requests.indexOf(request), { id: "custom-session", modelLabel: "org/my-model", resumed: false });
   const ask = h.requests.find((request) => request.url.endsWith("/ask"));
-  assert.ok(ask);
-  assert.doesNotMatch(JSON.stringify(ask), /session-secret/);
+  assert.equal(ask, undefined, "new sessions do not request a model greeting");
+  assert.match(h.visibleText, /只读代码分析助手/);
 });
 
 test("custom mode requires a backend token and valid URL and model, but allows an empty API key", async (t) => {
@@ -613,4 +616,41 @@ test("a failed connection is not recorded, and a restored backend model takes pr
   await h.flushTimers();
   await h.reply(h.requests.findLastIndex(request => request.url.endsWith("/models")), { ...modelList, models: [modelList.models[1]] });
   assert.equal(h.select.props.value, "openai-codex/gpt-5-mini", "a model removed from backend must fall back to an available model");
+});
+
+
+test("knowledge entry uses the session's canonical project and backend despite configuration drafts", async (t) => {
+  const h = await setup(t);
+  await configureCustomSession(h, "https://git.test/project.git");
+  await h.clickConnect();
+  await h.reply(h.requests.findLastIndex(request => request.url.endsWith("/sessions")), { id: "bound", projectPath: "/canonical/project", modelLabel: "model", resumed: true });
+  await h.openConfig();
+  await h.input("Token", "draft-token");
+  await h.input("后端地址", "http://draft.test");
+  await h.input("项目路径 或 git URL", "/draft-project");
+  await h.closeConfig();
+  await h.openKnowledge();
+  const request = h.requests.findLast(request => request.url.includes("/memory/knowledge?"));
+  assert.equal(request.url, "http://127.0.0.1:8787/memory/knowledge?project=%2Fcanonical%2Fproject&state=candidate&limit=20&offset=0");
+  assert.equal(request.headers.Authorization, "Bearer backend-token");
+});
+
+test("stale conversation disables sending and one-click fresh session preserves unsent draft", async (t) => {
+  const h = await setup(t, { staleAsk: true });
+  await configureCustomSession(h);
+  await h.clickConnect();
+  await h.reply(h.requests.findLastIndex(request => request.url.endsWith("/sessions")), { id: "stale", projectPath: "/connected-project", modelLabel: "model", resumed: false });
+  await h.inputMessage("First question");
+  await h.clickButton("发送");
+  await h.inputMessage("Draft to keep");
+  assert.match(h.visibleText, /上下文已过期/);
+  assert.equal(h.messageInput.props.disabled, false, "draft stays editable while stale");
+  await h.clickButton("新建会话继续");
+  const next = h.requests.findLastIndex(request => request.url.endsWith("/sessions"));
+  assert.deepEqual(JSON.parse(h.requests[next].body), { project: "/connected-project", resume: false, llm: { baseUrl: "http://gateway.test/v1", apiKey: "session-secret", model: "org/custom-model" } });
+  assert.equal(h.messageInput.props.value, "Draft to keep");
+  await h.reply(next, { id: "fresh", projectPath: "/connected-project", modelLabel: "model", resumed: false });
+  assert.equal(h.messageInput.props.value, "Draft to keep");
+  assert.doesNotMatch(h.visibleText, /First question|上下文已过期/);
+  assert.equal(h.requests.filter(request => request.url.endsWith("/ask")).length, 1);
 });

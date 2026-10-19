@@ -18,6 +18,9 @@ import {
 import { listModels } from "./models.js";
 import { runAsk, type AskEvent } from "./ask.js";
 import { createSkillRoutes } from "./skill-routes.js";
+import { createMemoryRoutes } from "./memory-routes.js";
+import type { AskOptions } from "./ask.js";
+import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { SessionQueue } from "./session-queue.js";
 import { LlmConfigError, parseModelOptions } from "./llm-config.js";
 import { HistoryError, listProjectHistory, validateHistorySelection } from "./session-history.js";
@@ -69,6 +72,7 @@ function makeSseWriter(stream: SSEStreamingApi) {
 
 function sseHandler(write: (e: string, d: unknown) => Promise<void>) {
   return (e: AskEvent) => {
+    if (e.type === "answer_reused") { void write("text", { delta: e.answer }); return; }
     if (e.type === "skill_preview") { void write("skill_preview", e.preview); return; }
     if (e.type === "skills_applied") { void write("skills_applied", e.snapshot); return; }
     if (e.type === "message_update") {
@@ -85,6 +89,21 @@ function sseHandler(write: (e: string, d: unknown) => Promise<void>) {
       void write("tool", { name: e.toolName, phase: "end", isError: e.isError });
     }
   };
+}
+
+function askOptions(body: { requestId?: unknown; reuse?: unknown }): AskOptions {
+  if (body.requestId !== undefined && (typeof body.requestId !== "string" || !body.requestId.trim() || body.requestId.length > 200)) throw new Error("requestId 必须是 1 到 200 字符");
+  if (body.reuse !== undefined && body.reuse !== "auto" && body.reuse !== "bypass") throw new Error("reuse 必须是 auto 或 bypass");
+  return { requestId: body.requestId as string | undefined, reuse: body.reuse as AskOptions["reuse"] };
+}
+function askFailure(error: unknown) {
+  const known = error as { status?: number; code?: string; newSessionRequired?: boolean } | undefined;
+  return { message: error instanceof Error ? error.message : String(error),
+    ...(known?.code ? { code: known.code } : {}), ...(known?.newSessionRequired ? { newSessionRequired: true } : {}) };
+}
+function askStatus(error: unknown): ContentfulStatusCode {
+  const status = (error as { status?: number } | undefined)?.status;
+  return ([400, 404, 409, 503].includes(status ?? 0) ? status : 500) as ContentfulStatusCode;
 }
 
 // ---------------- App ----------------
@@ -105,6 +124,7 @@ export function createApp(token: string) {
 
   app.get("/health", (c) => c.json({ status: "ok" }));
   app.route("/skills", createSkillRoutes());
+  app.route("/memory", createMemoryRoutes());
 
   // 列出可用模型（需鉴权）
   app.get("/models", async (c) => {
@@ -171,13 +191,15 @@ export function createApp(token: string) {
     const entry = getSession(c.req.param("id"));
     if (!entry) return c.json({ error: "session not found" }, 404);
 
-    let body: { question?: string };
+    let body: { question?: string; requestId?: string; reuse?: "auto" | "bypass" };
+    let options: AskOptions;
     try {
       body = await c.req.json();
+      options = askOptions(body);
     } catch {
       return c.json({ error: "invalid json body" }, 400);
     }
-    if (!body.question) return c.json({ error: "missing 'question'" }, 400);
+    if (typeof body.question !== "string" || !body.question.trim()) return c.json({ error: "missing 'question'" }, 400);
 
     const wantStream = c.req.query("stream") !== "false";
 
@@ -185,7 +207,7 @@ export function createApp(token: string) {
       try {
         const outcome = await runOnSession(
           entry,
-          (signal) => runAsk(entry.session, body.question!, undefined, signal),
+          (signal) => runAsk(entry.session, body.question!, undefined, signal, options),
           c.req.raw.signal,
         );
         return c.json({
@@ -193,9 +215,10 @@ export function createApp(token: string) {
           modelLabel: entry.modelLabel,
           toolCalls: outcome.toolCalls,
           skillPreviews: outcome.skillPreviews,
+          ...outcome.metadata,
         });
       } catch (e) {
-        return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
+        return c.json({ error: askFailure(e).message, ...askFailure(e) }, askStatus(e));
       }
     }
 
@@ -207,12 +230,12 @@ export function createApp(token: string) {
       try {
         const outcome = await runOnSession(
           entry,
-          (signal) => runAsk(entry.session, body.question!, sseHandler(write), signal),
+          (signal) => runAsk(entry.session, body.question!, sseHandler(write), signal, options),
           controller.signal,
         );
-        await write("done", { modelLabel: entry.modelLabel, answer: outcome.answer });
+        await write("done", { modelLabel: entry.modelLabel, answer: outcome.answer, ...outcome.metadata });
       } catch (e) {
-        await write("error", { message: e instanceof Error ? e.message : String(e) });
+        await write("error", askFailure(e));
       }
     });
   });
@@ -224,10 +247,12 @@ export function createApp(token: string) {
 
   // 一次性提问（无会话，JSON；?stream=true 可流式）
   app.post("/ask", async (c) => {
-    let body: { project?: string; question?: string; modelId?: string };
+    let body: { project?: string; question?: string; modelId?: string; requestId?: string; reuse?: "auto" | "bypass" };
     let modelOptions: ReturnType<typeof parseModelOptions>;
+    let options: AskOptions;
     try {
       body = await c.req.json();
+      options = askOptions(body);
       modelOptions = parseModelOptions(body);
     } catch (e) {
       if (e instanceof LlmConfigError) return c.json({ error: e.message }, 400);
@@ -267,12 +292,12 @@ export function createApp(token: string) {
         if (stream.aborted) controller.abort();
         try {
           const outcome = await queue.run(
-            (signal) => runAsk(session, body.question!, sseHandler(write), signal),
+            (signal) => runAsk(session, body.question!, sseHandler(write), signal, options),
             controller.signal,
           );
-          await write("done", { modelLabel, answer: outcome.answer });
+          await write("done", { modelLabel, answer: outcome.answer, ...outcome.metadata });
         } catch (e) {
-          await write("error", { message: e instanceof Error ? e.message : String(e) });
+          await write("error", askFailure(e));
         } finally {
           await queue.close();
         }
@@ -281,12 +306,12 @@ export function createApp(token: string) {
 
     try {
       const outcome = await queue.run(
-        (signal) => runAsk(session, body.question!, undefined, signal),
+        (signal) => runAsk(session, body.question!, undefined, signal, options),
         c.req.raw.signal,
       );
-      return c.json({ answer: outcome.answer, modelLabel, toolCalls: outcome.toolCalls, skillPreviews: outcome.skillPreviews });
+      return c.json({ answer: outcome.answer, modelLabel, toolCalls: outcome.toolCalls, skillPreviews: outcome.skillPreviews, ...outcome.metadata });
     } catch (e) {
-      return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
+      return c.json({ error: askFailure(e).message, ...askFailure(e) }, askStatus(e));
     } finally {
       await queue.close();
     }
