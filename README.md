@@ -61,7 +61,7 @@ cd web && npm install && npm run dev                 # 终端 2：前端，打�
 - **过程可视化**：实时展示模型的思考过程（reasoning）与工具调用（工具名、参数、耗时、结果预览）。
 - **本地路径 + 远程 URL 都支持**：URL 自动浅克隆到 `~/.code-analyzer/repos/<hash>`，已克隆则复用。
 - **可配置的模型与凭据**：复用本机 pi 配置，或在网页、REPL、HTTP 请求中指定 OpenAI 兼容接口的 Base URL、API Key 和模型名。
-- **本地知识复用**：回答旁点赞／收录候选，在「知识库」核验源码并人工发布；同版本、同配置的首问可直接复用，类似问题检索参考证据。使用 SQLite + zvec 中文 BM25，不需要 Embedding 模型。
+- **本地知识复用**：回答旁点赞／收录候选，在「知识库」核验源码并人工发布；同版本、同配置的首问可直接复用，类似问题检索参考证据。使用 SQLite + zvec 中文 BM25，不需要 Embedding 模型。设计和操作流程见[记忆与知识复用](#记忆与知识复用)。
 
 **三种使用形态**
 
@@ -203,9 +203,9 @@ npm run serve -- --port 8787 --token my-secret-key
 | GET | `/history?project=<项目路径或URL>` | 本项目持久化历史，返回 `{projectPath, sessions:[{id,title,createdAt,updatedAt,messageCount,modelLabel?,active?,activeSessionId?}]}` |
 | POST | `/sessions` | 建会话或恢复，body `{project, historyId?, resume?, modelId?, llm?, sessionId?}` → `{id, historyId, projectPath, modelLabel, resumed, messages}` |
 | GET | `/sessions` | 列出活动会话 |
-| POST | `/sessions/:id/ask` | 提问，body `{question}`；默认 SSE 流式，`?stream=false` 返回 JSON |
+| POST | `/sessions/:id/ask` | 提问，body `{question, requestId?, reuse?}`；默认 SSE 流式，`?stream=false` 返回 JSON |
 | DELETE | `/sessions/:id` | 释放会话 |
-| POST | `/ask` | 一次性提问，body `{project, question, modelId?, llm?}`；默认 JSON，`?stream=true` 流式 |
+| POST | `/ask` | 一次性提问，body `{project, question, modelId?, llm?, requestId?, reuse?}`；默认 JSON，`?stream=true` 流式 |
 
 `llm` 格式为 `{baseUrl: string, model: string, apiKey?: string}`，与 `modelId` 互斥。`baseUrl` 与 `model` 必填；`apiKey` 省略或空字符串表示无鉴权，不使用服务器已有凭据。`/models` 只返回服务器已配置的模型；自定义模型不需要出现在该列表中。
 
@@ -218,6 +218,8 @@ npm run serve -- --port 8787 --token my-secret-key
 历史的 `activeSessionId` 标识当前占用它的运行时连接。通过 `DELETE /sessions/:activeSessionId` 可退出该连接、中止其任务并保留历史；精确使用列表中的运行时 ID，避免旧的退出操作误关后来恢复的新连接。会话创建或清理尚未完成时可能只有 `active: true`，稍后刷新列表即可。
 
 HTTP 请求头中的 Bearer Token 是 **code-analyzer 后端访问令牌**；`llm.apiKey` 是 **模型服务凭据**，两者用途不同。
+
+`reuse` 默认为 `"auto"`；`"bypass"` 跳过本次知识查询，直接分析。`requestId` 用于同一历史会话中已成功请求的重试，避免重复追加消息；相同 ID 配合不同问题会返回 409。知识列表、反馈与审核接口见[记忆接口说明](docs/memory.md#终端与-api)，沿用同一 Bearer Token。
 
 ### curl 示例
 
@@ -265,6 +267,8 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/jso
 | `done` | `{"modelLabel":"...","answer":"完整回答"}` |
 | `error` | `{"message":"..."}` |
 
+记忆功能可用且回答成功完成时，JSON 响应和 SSE `done` 还会包含 `answerId`、`answerVersion`、`source`、`knowledgeIds` 与 `usage`，恢复历史时保留这些标识。`source` 区分模型生成（`generated`）、知识直接复用（`exact`）和参考知识生成（`assisted`）。旧上下文失效时返回 `code: "context_stale"`、`newSessionRequired: true`；JSON 使用 HTTP 409，已经建立的 SSE 通过 `error` 事件通知。
+
 > 同一会话的请求会**串行排队**（pi 的单会话模型同一时刻只允许一个 prompt）；不同会话之间并行。客户端断开 SSE 连接时，仅取消该连接对应的请求：排队中的请求会被跳过，正在执行的请求会被中止，其他请求不受影响。
 
 `DELETE /sessions/:id` 会立即移除活动会话、拒绝新任务并跳过尚未执行的任务，等待当前任务及其中止操作结束后再释放资源。删除操作只释放运行中的会话，不删除磁盘上的历史记录。Web 在新建、重新连接或组件卸载时调用此接口；网络断开或浏览器崩溃时仍可能无法送达清理请求。
@@ -273,7 +277,7 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/jso
 
 一个单页聊天前端（`web/` 目录），通过 SSE 实时消费上面的 HTTP 接口。
 
-技术栈：Vite + React 19 + TypeScript + Ant Design 6 + Tailwind CSS v4（关闭 preflight 避免重置 AntD 样式）+ react-markdown（代码高亮）+ @microsoft/fetch-event-source（POST + SSE）。
+技术栈：Vite + React 19 + TypeScript + Tailwind CSS v4 + react-markdown（代码高亮）+ Mermaid（图表）+ @microsoft/fetch-event-source（POST + SSE）。
 
 ### 启动
 
@@ -299,11 +303,92 @@ cd web && npm install && npm run dev
 
 刷新、关闭或离开网页时，前端通过 `pagehide` 发送带鉴权的 `keepalive` 请求退出当前会话。浏览器崩溃、断网等情况下自动清理可能无法送达；可在历史列表中点击使用中条目旁的「退出会话」，确认后释放占用，再选择该历史继续。退出会保留历史记录；如果该会话仍被其他窗口使用，也会中止其任务。
 
-功能：流式回答（Markdown 渲染）、思考过程/工具调用可折叠查看、多轮追问、按项目列出与恢复历史、新建会话、停止回答。
+功能：流式回答（Markdown 渲染）、思考过程/工具调用可折叠查看、多轮追问、按项目列出与恢复历史、新建会话、停止回答，以及顶栏「技能」「知识库」管理入口。
 
 回复中的 `mermaid` 围栏代码块会直接绘制为图表，页面隐藏源码。完整图块可在回复继续生成时显示；尚未闭合时显示生成提示，停止后未完成或语法错误时显示说明。图表按需加载并适配消息宽度，特别宽的架构图可横向滚动。
 
 非空 AI 回复在完成或停止后，下方会出现复制图标。点击后将完整 Markdown 原文复制到系统剪贴板，包含 Mermaid 源码，不包含思考和工具记录；成功会显示「已复制」。剪贴板功能需要 HTTPS 或 localhost 等浏览器允许的安全环境，权限失败时会显示重试提示。
+
+成功完成且带回答 ID 的回复另有「评价回复」与书本收录图标；悬浮或键盘聚焦可查看说明，点击评价图标展开有帮助／无帮助／撤销评价。知识复用来源会在回复中标识，具体流程见下一节。
+
+## 记忆与知识复用
+
+面向重复的代码逻辑问题，将有价值的回答整理为带源码证据、适用条件和版本的项目知识。已审核答案可以减少重复分析，并让相同问题在相同条件下得到一致回答；知识需要经人工发布才参与复用。
+
+### 分层设计
+
+| 层次 | 实现 | 职责 |
+| --- | --- | --- |
+| 短期对话上下文 | pi SDK 会话历史与压缩机制 | 支持当前讨论中的多轮追问、持久化和历史恢复 |
+| 长期项目知识 | `src/memory/` + SQLite | 保存来源回答、反馈、不可变知识版本、源码证据与复用记录，作为权威数据 |
+| 本地检索索引 | 可选的 `@zvec/zvec@0.7.1` | 用 jieba 中文分词和 BM25 全文检索已发布知识，可从 SQLite 重建 |
+
+当前使用 zvec 的全文索引能力，**没有向量字段，不需要在线或本地 Embedding 模型，也不需要独立数据库服务**。BM25 按词项匹配，完全换一种说法时可能检索不到；检索命中也不代表答案一定适用。
+
+SQLite、Git 快照校验与 zvec 原生操作放在后台 Worker 中，避免阻塞 HTTP 主线程。知识发布与待执行索引操作在同一 SQLite 事务中保存，再按项目加跨进程锁同步索引；失败的操作保留重试，不在模型生成期间持有索引锁。Web、HTTP 与独立 REPL 共用该服务和本地数据。
+
+### 提问时如何复用
+
+| 路径 | 触发条件 | 结果 |
+| --- | --- | --- |
+| 直接复用 `exact` | 全新会话首个真实问题，去除首尾空白后完全相同，且知识与当前源码、策略配置匹配 | 返回已发布 Markdown 答案，**不调用模型**，同时写入真实对话历史 |
+| 参考知识 `assisted` | 类似问题或后续问题检索到适用的已发布知识 | 把知识作为本轮临时参考，由模型结合问题继续分析和回答 |
+| 普通分析 `generated` | 未命中、主动跳过复用，或全文索引不可用且未命中严格直接复用 | 使用现有只读工具与模型分析 |
+
+复用范围绑定**项目真实路径、分支、完整 Git 提交及工作区状态**，并校验策略哈希：实际系统提示词、已启用 Skills 版本、模型及接口配置；凭据不参与记录。不同项目目录互相隔离。
+
+参考知识最多检索 5 条、注入 3 条完整记录，预算约 1500 个估算 Token。参考内容包含适用条件和文件行号，以本轮用户参考数据提供给模型，不授予额外工具权限。检索采用 300 ms 软等待预算，超时可继续普通分析；该预算不代表整个请求的延迟上限。
+
+直接复用能省去该次模型调用；参考知识仍需调用模型，实际节省取决于问题和后续分析。用量缺失时显示 `unknown`／`null`，不当作零消耗；只有直接复用标记 `no-model-call`。
+
+### 网页：收集、审核与维护
+
+1. **收集候选**：回答下方点击评价图标选择「有帮助」，或点击书本加号收录。点赞和收录均只创建候选，票数不会自动触发发布。失败、停止和旧版无回答 ID 的消息不能进入该流程。
+2. **整理内容**：打开顶栏「知识库」，在候选中编辑问题、答案、适用条件及源码文件行号。已连接时始终绑定会话实际的项目和后端地址。
+3. **核验并发布**：点击「核验源码」，阅读固定 Git 提交中的证据后人工发布。发布检查普通受版本控制文件、Git blob、当前文件内容和行号；不接受链接、二进制或无效范围。
+4. **复用与追溯**：在源码与策略匹配的新会话中提问；回复标记直接复用或参考知识生成，并保留回答 ID、引用的知识版本和用量信息。
+5. **复核与撤回**：在「候选／已发布／待复核」列表维护知识，可修订、暂停或撤回。代码更新后，通过「在当前代码版本重新核验」核对证据并发布新版本；旧版本和来源回答保留。
+
+「无帮助」可记录事实错误、内容过期、不相关或表达问题及说明。针对**直接复用答案**的事实错误／过期反馈，会暂停它实际使用的当前知识版本；旧版本反馈不会暂停后来发布的新修订。审核更新带 revision 校验，多窗口同时修改时返回冲突，避免覆盖他人的变更。浏览器刷新后可恢复或撤销自己的反馈。
+
+### 终端使用
+
+```text
+/memory                         查看当前项目知识和索引状态
+/memory search <问题>            检索当前源码版本下的已发布知识
+/memory bypass <问题>            本次跳过知识查询，直接分析
+/feedback up                     对刚完成的回答点赞，生成待审核候选
+/feedback down incorrect <说明>  反馈事实错误
+/feedback clear                  撤销评价
+```
+
+知识审核在网页进行。网页输入框下的「本次跳过知识复用」与 `/memory bypass` 对应，API 使用 `reuse: "bypass"`。
+
+### 版本失效与上下文边界
+
+- **工作区需干净**：未提交／未跟踪文件，以及 `assume-unchanged`、`skip-worktree`、子模块等无法安全确认的状态，会禁用知识复用；新会话仍可普通分析。
+- **按整个项目版本校验**：分支、提交或干净状态变化后，旧知识停止适用，无关代码的提交也可能触发失效。源码校验使用前后检查，不是原子文件系统快照，无法保证识别修改后又恢复的并发写入。
+- **旧上下文不能静默继续**：已记录回答的源码版本变化、已引用知识被修订／暂停／撤回，或已有知识上下文无法核验时，会要求新建会话，原历史保留。恢复历史也执行这些检查；「跳过知识复用」不会清除旧上下文的影响。
+
+### 运行要求、存储与开关
+
+使用 Node.js ≥ 22.13 后随应用启用，无需单独启动服务。zvec 是可选原生依赖，目前验证环境为 macOS arm64、Node 26.8.2；其他平台需确认对应二进制可用。缺少 zvec 时，SQLite 知识管理和严格直接复用仍可工作，类似问题检索降级为普通分析。Node 版本较旧时记忆功能不启用，普通分析仍可用。
+
+| 位置或配置 | 用途 |
+| --- | --- |
+| `~/.code-analyzer/memory/state.sqlite` 及 WAL | 来源回答、反馈、知识版本、索引待办与复用请求日志 |
+| `~/.code-analyzer/memory/index/<项目标识>` | 可重建的 zvec 全文索引 |
+| `CODE_ANALYZER_DATA_DIR` | 覆盖应用数据根目录；使用相同目录的 HTTP 与 REPL 可共享知识 |
+| `CODE_ANALYZER_MEMORY=off` | 关闭记忆功能，保留已保存的数据 |
+
+```bash
+# 临时关闭记忆与知识复用
+CODE_ANALYZER_MEMORY=off npm run serve -- --port 8787 --token my-secret-key
+```
+
+数据库保存问题、答案和源码片段，应与历史会话一起备份；备份 SQLite 时停止服务或使用一致性备份方式。模型 API Key 和后端 Token 不写入记忆记录，用户自行粘贴到问题／答案中的内容仍会保存。当前采用单用户、共享后端 Token 权限模型，匿名反馈标识不代表真实用户身份，也不能据此判断多人认可。
+
+详细接口、故障降级与验证命令见[本地记忆与知识复用](docs/memory.md)，设计取舍见[zvec 可行性调研](docs/research/2026-10-19-zvec-memory-feasibility.md)。[验证报告](docs/evaluation/2026-10-19-memory-verification.md)记录了原生包验证、检索样例和性能数据；固定样例用于验证机制，不能作为真实业务准确率或 Token 节省比例的证明。
 
 ## 架构与设计
 
@@ -323,8 +408,10 @@ code-analyzer/
 │   ├── repl.ts                 # 终端 REPL（流式 + 思考/工具可视化）
 │   ├── server.ts               # HTTP 服务（Hono，SSE + JSON，Bearer 鉴权）
 │   ├── session-registry.ts     # 会话注册表 + 每会话串行队列
+│   ├── memory/                 # 记忆与知识复用：运行时、SQLite、zvec、源码校验、Worker
+│   ├── memory-routes.ts        # 知识列表、反馈、证据核验与审核接口
 │   └── config.ts               # .env / 环境变量加载
-└── web/                        # 前端（React + Ant Design + Tailwind）
+└── web/                        # 前端（React + Tailwind）
     └── src/ ...
 ```
 
@@ -351,6 +438,7 @@ session-factory（只读会话 + 模型/凭据 + 系统提示词）
 5. **并发模型**：pi 的单会话同一时刻只允许一个 prompt，因此每个会话挂一条串行队列；不同会话之间并行。
 6. **SSE 事件协议**：包含 `thinking / tool / text / done / error`，以及技能预览 `skill_preview` 和本轮技能快照 `skills_applied`。
 7. **安全**：`.env` 已被 `.gitignore` 忽略，凭据不落库；HTTP 服务默认绑 `127.0.0.1` + Bearer token 鉴权。
+8. **知识复用独立分层**：pi 管短期上下文，`src/memory/` 管经人工审核的长期项目知识。SQLite 是权威存储，zvec 只做可重建索引；复用前校验源码和策略版本，失效的历史上下文要求新建会话。
 
 ## 开发
 
