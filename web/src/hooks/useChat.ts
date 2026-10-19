@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ChatMessage, SseEventName, ToolCall, SkillPreview, SkillSnapshot } from "../types";
+import type { ChatMessage, SseEventName, ToolCall, SkillPreview, SkillSnapshot, AnswerMetadata } from "../types";
 import { askStream, createSession, deleteSession, confirmSkillImport, type ServerConfig, type SessionModel } from "../api/client";
 
-const GREETING_PROMPT =
-  "会话已建立。请用简短友好的中文向用户打个招呼，介绍你是只读的代码逻辑分析助手，能帮他分析项目整体架构、追踪调用链、解释某段代码逻辑、查看代码演进历史等，并邀请他开始提问。不要冗长。";
+const WELCOME = "你好，我是只读代码分析助手。可以帮助你分析项目架构、追踪调用链、解释代码逻辑和查看代码演进历史。请输入你的问题。";
 
 export interface UseChatApi {
   messages: ChatMessage[];
@@ -16,7 +15,9 @@ export interface UseChatApi {
   skillsRevision: number;
   confirmSkillPreview: (preview: SkillPreview) => Promise<void>;
   connect: (project: string, resume: boolean, model?: SessionModel, historyId?: string) => Promise<void>;
-  send: (question: string) => Promise<void>;
+  send: (question: string, reuse?: "auto" | "bypass") => Promise<void>;
+  contextStale: boolean;
+  restartSession: () => Promise<void>;
   stop: () => void;
   newSession: () => void;
   disconnect: (sessionId: string, config: ServerConfig) => Promise<void>;
@@ -28,12 +29,15 @@ interface Buffer {
   tools: ToolCall[];
   error?: string;
   stopped?: boolean;
+  metadata?: Partial<AnswerMetadata>;
 }
 
 interface ActiveSession {
   id: string;
   config: ServerConfig;
   projectPath: string;
+  model?: SessionModel;
+  stale?: boolean;
 }
 
 interface ActiveStream {
@@ -54,6 +58,7 @@ export function useChat(config: ServerConfig): UseChatApi {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [modelLabel, setModelLabel] = useState<string | null>(null);
   const [streaming, setStreaming] = useState(false);
+  const [contextStale, setContextStale] = useState(false);
   const [projectPath, setProjectPath] = useState<string | null>(null);
   const [activeConfig, setActiveConfig] = useState<ServerConfig | null>(null);
   const [skills, setSkills] = useState<SkillSnapshot["skills"]>([]);
@@ -78,6 +83,7 @@ export function useChat(config: ServerConfig): UseChatApi {
               tools: [...buf.tools],
               error: buf.error,
               stopped: buf.stopped,
+              ...buf.metadata,
               streaming: finalize ? false : m.streaming,
             }
           : m,
@@ -113,6 +119,7 @@ export function useChat(config: ServerConfig): UseChatApi {
     previewOrigins.current.clear();
     if (previous && releaseRemote) releaseSession(previous);
     if (updateState) {
+      setContextStale(false);
       setSessionId(null);
       setProjectPath(null);
       setActiveConfig(null);
@@ -149,12 +156,13 @@ export function useChat(config: ServerConfig): UseChatApi {
     }
   }, [resetSession]);
 
-  /** 发起一次流式提问；showUser=false 表示开场（不显示为用户气泡）。 */
+  /** 发起一次用户提问；请求标识在整个流式请求期间保持稳定。 */
   const runAsk = useCallback(
-    async (session: ActiveSession, question: string, opts: { showUser: boolean }) => {
+    async (session: ActiveSession, question: string, opts: { showUser: boolean; reuse?: "auto" | "bypass" }) => {
       const trimmed = question.trim();
-      if (!trimmed || streamRef.current || sessionRef.current !== session) return;
+      if (!trimmed || session.stale || streamRef.current || sessionRef.current !== session) return;
 
+      const requestId = crypto.randomUUID();
       const asstId = crypto.randomUUID();
       const asstMsg: ChatMessage = {
         id: asstId,
@@ -236,13 +244,15 @@ export function useChat(config: ServerConfig): UseChatApi {
             break;
           }
           case "done": {
-            const d = data as { answer?: string };
+            const d = data as Partial<AnswerMetadata> & { answer?: string };
+            buf.metadata = { answerId: d.answerId, answerVersion: d.answerVersion, source: d.source, knowledgeIds: d.knowledgeIds, usage: d.usage };
             if (typeof d.answer === "string") buf.text = d.answer;
             scheduleFlush(stream);
             break;
           }
           case "error": {
-            const d = data as { message?: string };
+            const d = data as { message?: string; code?: string };
+            if (d.code === "context_stale") { session.stale = true; setContextStale(true); }
             buf.error = d?.message ?? "未知错误";
             scheduleFlush(stream);
             break;
@@ -251,7 +261,7 @@ export function useChat(config: ServerConfig): UseChatApi {
       };
 
       try {
-        await askStream(session.config, session.id, trimmed, stream.controller.signal, handleEvent);
+        await askStream(session.config, session.id, trimmed, stream.controller.signal, handleEvent, { requestId, reuse: opts.reuse ?? "auto" });
       } catch (e) {
         const err = e as Error;
         if (err.name !== "AbortError") stream.buffer.error = err.message;
@@ -268,12 +278,12 @@ export function useChat(config: ServerConfig): UseChatApi {
   );
 
   const connect = useCallback(
-    async (project: string, resume: boolean, model?: SessionModel, historyId?: string) => {
+    async (project: string, resume: boolean, model?: SessionModel, historyId?: string, originConfig = config) => {
       resetSession();
       const version = connectionVersionRef.current;
-      const sessionConfig = { ...config };
+      const sessionConfig = { ...originConfig };
       const s = await createSession(sessionConfig, project, resume, model, historyId);
-      const session = { id: s.id, config: sessionConfig, projectPath: s.projectPath };
+      const session: ActiveSession = { id: s.id, config: sessionConfig, projectPath: s.projectPath, model, stale: s.messages?.some((message) => message.stale) };
       // A reset, newer connect, or unmount may have happened while POST was pending.
       if (connectionVersionRef.current !== version) {
         releaseSession(session);
@@ -286,14 +296,16 @@ export function useChat(config: ServerConfig): UseChatApi {
       setActiveConfig(sessionConfig);
       setSkills(s.skills ?? []);
       setSkillsRevision(s.skillsRevision ?? 0);
-      setMessages(s.messages ?? []);
-      // Restoring only loads the transcript; it must not append a new model turn.
-      if (!s.resumed && !historyId) {
-        void runAsk(session, GREETING_PROMPT, { showUser: false });
-      }
+      setContextStale(!!session.stale);
+      setMessages(s.messages ?? (!s.resumed && !historyId ? [{ id: crypto.randomUUID(), role: "assistant", content: WELCOME, thinking: "", tools: [], streaming: false }] : []));
     },
-    [config, resetSession, runAsk],
+    [config, resetSession],
   );
+
+  const restartSession = useCallback(async () => {
+    const current = sessionRef.current;
+    if (current) await connect(current.projectPath, false, current.model, undefined, current.config);
+  }, [connect]);
 
   const newSession = useCallback(() => {
     resetSession();
@@ -304,10 +316,10 @@ export function useChat(config: ServerConfig): UseChatApi {
   }, [stopStream]);
 
   const send = useCallback(
-    (question: string) => {
+    (question: string, reuse: "auto" | "bypass" = "auto") => {
       const session = sessionRef.current;
       if (!session) return Promise.resolve();
-      return runAsk(session, question, { showUser: true });
+      return runAsk(session, question, { showUser: true, reuse });
     },
     [runAsk],
   );
@@ -326,7 +338,7 @@ export function useChat(config: ServerConfig): UseChatApi {
   }, []);
 
   return useMemo(
-    () => ({ messages, sessionId, modelLabel, streaming, projectPath, activeConfig, skills, skillsRevision, confirmSkillPreview, connect, send, stop, newSession, disconnect }),
-    [messages, sessionId, modelLabel, streaming, projectPath, activeConfig, skills, skillsRevision, confirmSkillPreview, connect, send, stop, newSession, disconnect],
+    () => ({ messages, sessionId, modelLabel, streaming, contextStale, restartSession, projectPath, activeConfig, skills, skillsRevision, confirmSkillPreview, connect, send, stop, newSession, disconnect }),
+    [messages, sessionId, modelLabel, streaming, contextStale, restartSession, projectPath, activeConfig, skills, skillsRevision, confirmSkillPreview, connect, send, stop, newSession, disconnect],
   );
 }

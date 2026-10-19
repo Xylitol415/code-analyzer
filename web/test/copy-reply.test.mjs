@@ -78,7 +78,8 @@ test("only nonempty finished assistant replies offer copying, including stopped 
 test("copying preserves complete Markdown including Mermaid source and excludes thinking and tool metadata", async (t) => {
   const markdown = "# 分析\n\n**结论**与 [链接](https://example.test)\n\n```mermaid\ngraph TD\n  A[入口] --> B[结束]\n```\n";
   const h = await setup(t, { message: reply({ content: markdown, thinking: "不复制的思考", tools: [{ name: "read", args: { path: "private.ts" }, isError: false }] }) });
-  assert.equal(h.button.props.title, "复制 Markdown 原文");
+  assert.ok(h.button.props["aria-describedby"]);
+  assert.match(h.text, /复制 Markdown 原文/);
   await h.click();
   assert.deepEqual(h.copied, [markdown]);
   assert.match(h.text, /已复制/);

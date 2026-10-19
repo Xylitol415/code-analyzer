@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import type { AnswerMetadata, AnswerRecord, SourceSnapshot } from "./memory/types.js";
 import { getAgentDir, parseSessionEntries, SessionManager, type SessionEntry } from "@earendil-works/pi-coding-agent";
 
 export interface HistorySessionInfo {
@@ -14,7 +15,8 @@ export interface HistorySessionInfo {
   activeSessionId?: string;
 }
 
-export interface HistoryMessage {
+export interface HistoryMessage extends Partial<AnswerMetadata> {
+  snapshot?: SourceSnapshot;
   id: string;
   role: "user" | "assistant";
   content: string;
@@ -39,6 +41,8 @@ const AUTOMATIC_PROMPTS = new Set([
   "欢迎回来。请用简短的中文总结我们之前讨论过的内容和主要结论，方便用户快速回顾，然后邀请他继续提问。",
 ]);
 
+export function isAutomaticQuestion(question: string): boolean { return AUTOMATIC_PROMPTS.has(question.trim()); }
+
 export function validateHistorySelection(options: { historyId?: unknown; resume?: unknown; inMemory?: boolean }): void {
   if (options.historyId === undefined) return;
   if (typeof options.historyId !== "string" || options.historyId.length > 128 ||
@@ -62,12 +66,19 @@ export function historyMessages(entries: SessionEntry[]): HistoryMessage[] {
   const tools = new Map<string, HistoryMessage["tools"][number]>();
   let assistant: HistoryMessage | undefined;
   for (const entry of entries) {
+    if (entry.type === "custom" && entry.customType === "answer_completed") {
+      const record = entry.data as AnswerRecord | undefined;
+      if (assistant && record?.id && record.assistantEntryIds?.includes(assistant.id)) {
+        Object.assign(assistant, { content: record.answer, answerId: record.id, answerVersion: record.version,
+          source: record.source, knowledgeIds: record.knowledgeIds, usage: record.usage, snapshot: record.snapshot });
+      }
+    }
     if (entry.type !== "message") continue;
     const message = entry.message;
     if (message.role === "user") {
       assistant = undefined;
       const content = textContent(message.content);
-      if (!AUTOMATIC_PROMPTS.has(content.trim())) {
+      if (!isAutomaticQuestion(content)) {
         messages.push({ id: entry.id, role: "user", content, thinking: "", tools: [], streaming: false });
       }
     } else if (message.role === "assistant") {

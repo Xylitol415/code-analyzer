@@ -42,6 +42,11 @@ body,
 .session-status.is-connected > span { background: #10b981; }
 .session-toolbar button, .session-settings-dialog button { font: inherit; cursor: pointer; }
 .session-toolbar button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 36px; padding: 8px 12px; border: 1px solid transparent; border-radius: 8px; font-size: 13px; font-weight: 550; white-space: nowrap; }
+.session-toolbar button.knowledge-tab, .session-toolbar button.knowledge-remove-evidence { border: 0; }
+.session-toolbar button.knowledge-remove-evidence { background: transparent; }
+.session-toolbar button.knowledge-list-row { display: block; width: 100%; padding: 12px; border: 1px solid #e2e8f0; text-align: left; white-space: normal; background: #fff; }
+.session-toolbar button.knowledge-list-row:hover { border-color: #c7d2fe; }
+.session-toolbar button.knowledge-list-row[data-selected="true"] { border-color: #a5b4fc; background: #eef2ff80; }
 .session-new-button { background: transparent; color: #64748b; }
 .session-new-button:hover { background: #f1f5f9; color: #334155; }
 .session-config-button { background: #eef2ff; color: #4338ca; }

@@ -4,6 +4,8 @@ import { runAsk } from "./ask.js";
 import { getSessionSkills } from "./skills/runtime.js";
 import type { SkillService } from "./skills/service.js";
 import type { SkillPreview } from "./skills/types.js";
+import { getSessionMemory, sessionPolicyHash } from "./memory/runtime.js";
+import { executeMemoryCommand, replFeedbackClientId } from "./memory/commands.js";
 
 export interface SkillsCommandContext {
   projectPath: string;
@@ -176,6 +178,7 @@ export async function startRepl(session: AgentSession, options: ReplOptions = {}
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
   let running = false;
+  let feedbackClient: string | undefined;
   let turnAbort: AbortController | undefined;
   let isClosed = false;
 
@@ -237,6 +240,14 @@ export async function startRepl(session: AgentSession, options: ReplOptions = {}
       const turnPreviews: SkillPreview[] = [];
       const commandPreviews: SkillPreview[] = [];
       try {
+        const memory = getSessionMemory(session);
+        let bypassQuestion: string | undefined;
+        if (/^\/(?:memory|feedback)(?:\s|$)/.test(trimmed)) {
+          if (!memory) throw new Error("记忆功能未启用，请使用 Node 22.13 及以上版本。");
+          const command = await executeMemoryCommand(trimmed, { ...memory, policyHash: sessionPolicyHash(session), clientId: feedbackClient ??= replFeedbackClientId(), write: metaLine });
+          if (command.handled && !command.bypassQuestion) continue;
+          bypassQuestion = command.bypassQuestion;
+        }
         const previousIds = new Set(pending.keys());
         const handled = service && snapshot && await executeSkillsCommand(trimmed, { projectPath: snapshot.projectPath, service, pending, write: metaLine });
         if (handled) {
@@ -244,9 +255,10 @@ export async function startRepl(session: AgentSession, options: ReplOptions = {}
           commandPreviews.push(...created);
         } else {
           if (/^\/skills(?:\s|$)/.test(trimmed)) throw new Error("当前会话未绑定项目 Skills 服务。");
-          await runAsk(session, trimmed, (event) => {
+          await runAsk(session, bypassQuestion ?? trimmed, (event) => {
             if (event.type === "skill_preview") turnPreviews.push(event.preview);
-          }, turnAbort.signal);
+            if (event.type === "answer_reused") { metaLine("[复用已审核知识]"); process.stdout.write(event.answer); }
+          }, turnAbort.signal, { reuse: bypassQuestion ? "bypass" : "auto" });
         }
         forceNewline();
       } catch (e) {

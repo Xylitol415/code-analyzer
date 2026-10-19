@@ -1,0 +1,56 @@
+{
+  "at": "2026-10-19T02:55:28.524Z",
+  "node": "v26.8.2",
+  "platform": "darwin",
+  "arch": "arm64",
+  "cpu": "Apple M4",
+  "nativeVersion": "0.7.1",
+  "scope": "synthetic BM25; 5 cold processes × 21 queries; no model/embedding; parent timer measures process isolation",
+  "crossProcessWrites": "passed",
+  "collections": [
+    {
+      "count": 1000,
+      "seedMs": 1202.48075,
+      "coldFirstQueryMs": {
+        "p50": 219.10166700000002,
+        "p95": 322.06120799999997,
+        "samples": 5
+      },
+      "coldProcessMs": {
+        "p50": 2841.6176670000004,
+        "p95": 3246.853416
+      },
+      "warmOpenQueryCloseMs": {
+        "p50": 117.00041699999997,
+        "p95": 200.4695840000004,
+        "samples": 100
+      },
+      "parentEventLoop": {
+        "ticks": 2633,
+        "maxLagMs": 15.521958000000268
+      }
+    },
+    {
+      "count": 10000,
+      "seedMs": 2474.747292,
+      "coldFirstQueryMs": {
+        "p50": 259.460375,
+        "p95": 342.079291,
+        "samples": 5
+      },
+      "coldProcessMs": {
+        "p50": 3414.375625000004,
+        "p95": 3925.229292
+      },
+      "warmOpenQueryCloseMs": {
+        "p50": 139.49370899999985,
+        "p95": 238.94954199999984,
+        "samples": 100
+      },
+      "parentEventLoop": {
+        "ticks": 3086,
+        "maxLagMs": 32.15437500000189
+      }
+    }
+  ]
+}

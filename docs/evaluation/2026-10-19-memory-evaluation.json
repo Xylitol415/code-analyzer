@@ -1,0 +1,28 @@
+{
+  "at": "2026-10-19T03:01:37.659Z",
+  "scope": "20 synthetic code families × 8 boundaries; lexical paraphrases share symbols; no real model or business labels",
+  "scenarios": [
+    "exact-same-source",
+    "paraphrase-evidence",
+    "outside-conditions-no-direct-answer",
+    "other-project",
+    "other-policy",
+    "dirty-tree",
+    "changed-revision",
+    "withdrawn"
+  ],
+  "families": 20,
+  "total": 160,
+  "passed": 160,
+  "splits": {
+    "dev": {
+      "total": 80,
+      "passed": 80
+    },
+    "acceptance": {
+      "total": 80,
+      "passed": 80
+    }
+  },
+  "failures": []
+}

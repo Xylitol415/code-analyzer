@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { HistorySessionInfo, ModelInfo } from "../api/client";
+import type { SavedConfiguration } from "../config-history";
 import { Button } from "./Button";
 import { ChevronDownIcon, PlusIcon, RobotAvatar, XIcon } from "./Icons";
 
@@ -27,6 +28,10 @@ export interface ConfigBarProps {
   historyError?: string;
   historyId: string;
   releasingHistoryId: string | null;
+  savedConfigurations: SavedConfiguration[];
+  configStorageError: string;
+  onRestoreConfiguration: (entry: SavedConfiguration) => void;
+  onClearConfigurations: () => void;
   model: string;
   models: ModelInfo[];
   modelStatus: ModelStatus;
@@ -55,6 +60,7 @@ export interface ConfigBarProps {
   onConnect: () => Promise<boolean>;
   onNewSession: () => void;
   skillsControl?: ReactNode;
+  knowledgeControl?: ReactNode;
 }
 
 export function ConfigBar(props: ConfigBarProps) {
@@ -67,6 +73,7 @@ export function ConfigBar(props: ConfigBarProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const busy = props.connecting || !!props.releasingHistoryId;
+  const candidates = (field: "project" | "baseUrl" | "llmBaseUrl" | "llmModel") => [...new Set(props.savedConfigurations.map(entry => entry[field]).filter(Boolean))];
 
   useEffect(() => {
     setReleaseCandidate(null);
@@ -147,6 +154,7 @@ export function ConfigBar(props: ConfigBarProps) {
         </div>
         <div className="session-actions">
           {props.skillsControl}
+          {props.knowledgeControl}
           <span className={`session-status ${props.connected ? "is-connected" : ""}`}
             title={props.connected ? "已连接" : "未连接"}>
             <span aria-hidden="true" />{props.connected ? "已连接" : "未连接"}
@@ -188,10 +196,37 @@ export function ConfigBar(props: ConfigBarProps) {
 
             <div className="session-settings-body">
               <fieldset className="session-settings-section" disabled={busy}>
+                <legend>本地配置记录</legend>
+                <div className="mb-2 flex items-center justify-between gap-3 text-xs text-slate-500">
+                  <span>最近 {props.savedConfigurations.length} 组成功连接的配置</span>
+                  <button type="button" className="border-0 bg-transparent px-0 py-1 text-slate-500 hover:text-rose-600 disabled:opacity-40"
+                    disabled={!props.savedConfigurations.length} onClick={props.onClearConfigurations}>清空配置记录</button>
+                </div>
+                {props.savedConfigurations.length > 0 ? (
+                  <label className="session-field"><span>选择历史配置，一键回填</span>
+                    <select className="session-input" aria-label="选择历史配置" value="" onChange={(event) => {
+                      const entry = props.savedConfigurations.find(item => item.id === event.target.value);
+                      if (entry) props.onRestoreConfiguration(entry);
+                    }}>
+                      <option value="" disabled>选择一组配置…</option>
+                      {props.savedConfigurations.map(entry => <option key={entry.id} value={entry.id}>
+                        {entry.project} · {entry.modelMode === "custom" ? `${entry.llmModel} @ ${entry.llmBaseUrl}` : entry.model} · {entry.baseUrl}
+                      </option>)}
+                    </select>
+                  </label>
+                ) : <p className="session-field-hint">成功连接后自动记录，最多保留 10 组；下次打开页面会预填上次配置。</p>}
+                <p className="session-field-hint">仅保存在当前浏览器。不保存 Token 和 API Key，回填后需重新填写凭据；不会自动创建会话。</p>
+                {props.configStorageError && <p role="status" className="session-field-hint is-error">{props.configStorageError}</p>}
+              </fieldset>
+              <datalist id="config-project-history">{candidates("project").map(value => <option key={value} value={value} />)}</datalist>
+              <datalist id="config-backend-history">{candidates("baseUrl").map(value => <option key={value} value={value} />)}</datalist>
+              <datalist id="config-llm-url-history">{candidates("llmBaseUrl").map(value => <option key={value} value={value} />)}</datalist>
+              <datalist id="config-llm-model-history">{candidates("llmModel").map(value => <option key={value} value={value} />)}</datalist>
+              <fieldset className="session-settings-section" disabled={busy}>
                 <legend>分析项目</legend>
                 <label className="session-field">
                   <span>项目路径或 Git URL</span>
-                  <input className="session-input" placeholder="项目路径 或 git URL" aria-label="项目路径 或 git URL"
+                  <input className="session-input" placeholder="项目路径 或 git URL" aria-label="项目路径 或 git URL" list="config-project-history" autoComplete="off"
                     value={props.project} onChange={(event) => props.onProjectChange(event.target.value)} />
                 </label>
                 <div className="session-model-modes session-start-modes">
@@ -280,7 +315,7 @@ export function ConfigBar(props: ConfigBarProps) {
                 <div className="session-fields-grid">
                   <label className="session-field">
                     <span>后端地址</span>
-                    <input className="session-input" placeholder="后端地址" aria-label="后端地址"
+                    <input className="session-input" placeholder="后端地址" aria-label="后端地址" list="config-backend-history" autoComplete="off"
                       value={props.baseUrl} onChange={(event) => props.onBaseUrlChange(event.target.value)} />
                   </label>
                   <div className="session-field">
@@ -317,14 +352,14 @@ export function ConfigBar(props: ConfigBarProps) {
                   <>
                     <label className="session-field">
                       <span>LLM BaseURL</span>
-                      <input className="session-input" placeholder="LLM BaseURL" aria-label="LLM BaseURL"
+                      <input className="session-input" placeholder="LLM BaseURL" aria-label="LLM BaseURL" list="config-llm-url-history"
                         value={props.llmBaseUrl} onChange={(event) => props.onLlmBaseUrlChange(event.target.value)}
                         aria-invalid={props.llmUrlInvalid} aria-describedby="llm-config-hint" autoComplete="off" />
                     </label>
                     <div className="session-fields-grid session-custom-fields">
                       <label className="session-field">
                         <span>模型名</span>
-                        <input className="session-input" placeholder="模型名" aria-label="模型名" autoComplete="off"
+                        <input className="session-input" placeholder="模型名" aria-label="模型名" autoComplete="off" list="config-llm-model-history"
                           value={props.llmModel} onChange={(event) => props.onLlmModelChange(event.target.value)} />
                       </label>
                       <label className="session-field">

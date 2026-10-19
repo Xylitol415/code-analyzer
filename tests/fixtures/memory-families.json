@@ -1,0 +1,22 @@
+[
+  {"id":"cancel","split":"dev","symbol":"cancelGeneration","topic":"取消模型请求"},
+  {"id":"auth","split":"dev","symbol":"authorizeBackend","topic":"后端鉴权"},
+  {"id":"history","split":"dev","symbol":"restoreConversation","topic":"历史会话恢复"},
+  {"id":"skills","split":"dev","symbol":"confirmSkillImport","topic":"技能安装确认"},
+  {"id":"readonly","split":"dev","symbol":"validateReadonlyGit","topic":"只读 Git 校验"},
+  {"id":"queue","split":"dev","symbol":"enqueueSessionTurn","topic":"会话排队"},
+  {"id":"project","split":"dev","symbol":"resolveProjectScope","topic":"项目隔离"},
+  {"id":"model","split":"dev","symbol":"selectCustomModel","topic":"自定义模型"},
+  {"id":"markdown","split":"dev","symbol":"copyRawMarkdown","topic":"Markdown 原文复制"},
+  {"id":"diagram","split":"dev","symbol":"renderMermaidDiagram","topic":"Mermaid 绘图"},
+  {"id":"feedback","split":"acceptance","symbol":"persistAnswerFeedback","topic":"回答反馈"},
+  {"id":"publish","split":"acceptance","symbol":"publishReviewedKnowledge","topic":"知识审核发布"},
+  {"id":"revoke","split":"acceptance","symbol":"withdrawKnowledgeVersion","topic":"知识撤回"},
+  {"id":"evidence","split":"acceptance","symbol":"readCommittedEvidence","topic":"固定源码证据"},
+  {"id":"branch","split":"acceptance","symbol":"identifySourceRevision","topic":"源码版本识别"},
+  {"id":"dirty","split":"acceptance","symbol":"detectDirtyWorktree","topic":"工作区修改"},
+  {"id":"retry","split":"acceptance","symbol":"reconcileRequestJournal","topic":"请求重试"},
+  {"id":"index","split":"acceptance","symbol":"rebuildSearchIndex","topic":"检索索引重建"},
+  {"id":"usage","split":"acceptance","symbol":"reportMeasuredUsage","topic":"用量统计"},
+  {"id":"cleanup","split":"acceptance","symbol":"releaseSessionResources","topic":"会话资源清理"}
+]
