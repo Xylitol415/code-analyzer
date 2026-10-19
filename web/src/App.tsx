@@ -7,6 +7,7 @@ import { MessageInput } from "./components/MessageInput";
 import { ToastContainer, useToast } from "./components/Toast";
 import { SkillsManager } from "./components/SkillsManager";
 import { SparkleIcon } from "./components/Icons";
+import { CONFIG_HISTORY_KEY, clearConfigurationHistory, loadConfigurationHistory, rememberConfiguration, saveConfigurationHistory, type SavedConfiguration } from "./config-history";
 
 interface ModelDiscovery {
   config: ServerConfig;
@@ -22,18 +23,23 @@ interface HistoryDiscovery {
 }
 
 export default function App() {
-  const [baseUrl, setBaseUrl] = useState("http://127.0.0.1:8787");
+  const [savedConfigurations, setSavedConfigurations] = useState(loadConfigurationHistory);
+  const initial = useRef(savedConfigurations[0]);
+  const [configStorageError, setConfigStorageError] = useState("");
+  const [baseUrl, setBaseUrl] = useState(initial.current?.baseUrl ?? "http://127.0.0.1:8787");
   const [token, setToken] = useState("");
-  const [project, setProject] = useState("");
+  const [project, setProject] = useState(initial.current?.project ?? "");
   const [sessionMode, setSessionMode] = useState<SessionMode>("new");
   const [historyId, setHistoryId] = useState("");
   const [historyDiscovery, setHistoryDiscovery] = useState<HistoryDiscovery | null>(null);
   const [historyRevision, setHistoryRevision] = useState(0);
-  const [model, setModel] = useState("");
-  const [modelMode, setModelMode] = useState<ModelMode>("backend");
-  const [llmBaseUrl, setLlmBaseUrl] = useState("");
+  const [model, setModel] = useState(initial.current?.model ?? "");
+  const [modelMode, setModelMode] = useState<ModelMode>(initial.current?.modelMode ?? "backend");
+  const [llmBaseUrl, setLlmBaseUrl] = useState(initial.current?.llmBaseUrl ?? "");
   const [llmApiKey, setLlmApiKey] = useState("");
-  const [llmModel, setLlmModel] = useState("");
+  const [llmModel, setLlmModel] = useState(initial.current?.llmModel ?? "");
+  const preferredModel = useRef({ baseUrl: initial.current?.baseUrl, model: initial.current?.model });
+  const alive = useRef(true);
   const [discovery, setDiscovery] = useState<ModelDiscovery | null>(null);
   const [connecting, setConnecting] = useState(false);
   const [releasingHistoryId, setReleasingHistoryId] = useState<string | null>(null);
@@ -103,6 +109,26 @@ export default function App() {
   };
 
   useEffect(() => {
+    alive.current = true;
+    const sync = (event: StorageEvent) => {
+      if (event.key === CONFIG_HISTORY_KEY || event.key === null) setSavedConfigurations(loadConfigurationHistory());
+    };
+    window.addEventListener("storage", sync);
+    return () => { alive.current = false; window.removeEventListener("storage", sync); };
+  }, []);
+
+  const restoreConfiguration = (entry: SavedConfiguration) => {
+    setBaseUrl(entry.baseUrl); setProject(entry.project); setModelMode(entry.modelMode);
+    setModel(entry.model); setLlmBaseUrl(entry.llmBaseUrl); setLlmModel(entry.llmModel);
+    preferredModel.current = { baseUrl: entry.baseUrl, model: entry.model };
+    setToken(""); setLlmApiKey(""); setHistoryId("");
+  };
+  const clearConfigurations = () => {
+    if (clearConfigurationHistory()) { setSavedConfigurations([]); setConfigStorageError(""); }
+    else setConfigStorageError("本地存储不可用，无法清空配置记录。请检查浏览器存储权限。");
+  };
+
+  useEffect(() => {
     let cancelled = false;
     setHistoryId("");
     setHistoryDiscovery(null);
@@ -136,7 +162,8 @@ export default function App() {
           if (cancelled) return;
           const ids = r.models.map((m) => `${m.provider}/${m.id}`);
           setDiscovery({ config, models: r.models, status: ids.length ? "ready" : "empty" });
-          setModel(ids.includes(r.default) ? r.default : ids[0] ?? "");
+          const preferred = preferredModel.current.baseUrl === config.baseUrl ? preferredModel.current.model : undefined;
+          setModel(preferred && ids.includes(preferred) ? preferred : ids.includes(r.default) ? r.default : ids[0] ?? "");
         })
         .catch((error: unknown) => {
           if (cancelled) return;
@@ -162,6 +189,7 @@ export default function App() {
   const handleConnect = async () => {
     if (!canConnect) return false;
     setConnecting(true);
+    const usedConfiguration = { project: project.trim(), baseUrl: config.baseUrl, modelMode, model, llmBaseUrl, llmModel };
     try {
       await chat.connect(project.trim(), false, modelMode === "custom" ? {
         llm: {
@@ -170,6 +198,15 @@ export default function App() {
           model: llmModel.trim(),
         },
       } : model, sessionMode === "history" ? selectedHistory?.id : undefined);
+      if (!alive.current) return false;
+      const latest = loadConfigurationHistory();
+      const history = latest.length ? latest : savedConfigurations;
+      const updated = rememberConfiguration(history, usedConfiguration);
+      if (updated === history) setConfigStorageError("配置中的地址含凭据或不适合保存，本次未记录到浏览器历史。");
+      else {
+        setSavedConfigurations(updated);
+        setConfigStorageError(saveConfigurationHistory(updated) ? "" : "本地存储不可用，无法保存配置；本次会话仍可正常使用。");
+      }
       show("success", sessionMode === "history" ? "历史会话已恢复" : "会话已建立");
       return true;
     } catch (e) {
@@ -192,6 +229,10 @@ export default function App() {
         historyError={currentHistory?.error}
         historyId={selectedHistory?.id ?? ""}
         releasingHistoryId={releasingHistoryId}
+        savedConfigurations={savedConfigurations}
+        configStorageError={configStorageError}
+        onRestoreConfiguration={restoreConfiguration}
+        onClearConfigurations={clearConfigurations}
         model={model}
         models={models}
         modelStatus={modelStatus}
@@ -212,7 +253,7 @@ export default function App() {
         onHistorySelect={setHistoryId}
         onHistoryRefresh={refreshHistory}
         onHistoryRelease={releaseHistory}
-        onModelChange={setModel}
+        onModelChange={(value) => { setModel(value); preferredModel.current = { baseUrl: config.baseUrl, model: value }; }}
         onModelModeChange={setModelMode}
         onLlmBaseUrlChange={setLlmBaseUrl}
         onLlmApiKeyChange={setLlmApiKey}

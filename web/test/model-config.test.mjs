@@ -19,7 +19,7 @@ function visibleText(node) {
   return node?.children?.map(visibleText).join("") ?? "";
 }
 
-async function setup(t, { openConfig = true, autoRelease = true } = {}) {
+async function setup(t, { openConfig = true, autoRelease = true, storageBlocked = false } = {}) {
   const requests = [];
   const timers = new Map();
   let nextTimer = 0;
@@ -32,8 +32,14 @@ async function setup(t, { openConfig = true, autoRelease = true } = {}) {
   const oldDocument = globalThis.document;
   const oldActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT;
   const lifecycle = new EventTarget();
+  const storedItems = new Map();
   globalThis.window = {
     fetch: globalThis.fetch,
+    localStorage: {
+      getItem(key) { if (storageBlocked) throw new Error("Storage blocked"); return storedItems.get(key) ?? null; },
+      setItem(key, value) { if (storageBlocked) throw new Error("Storage blocked"); storedItems.set(key, value); },
+      removeItem(key) { if (storageBlocked) throw new Error("Storage blocked"); storedItems.delete(key); },
+    },
     addEventListener: lifecycle.addEventListener.bind(lifecycle),
     removeEventListener: lifecycle.removeEventListener.bind(lifecycle),
     setTimeout(callback) { const id = ++nextTimer; timers.set(id, callback); return id; },
@@ -57,9 +63,10 @@ async function setup(t, { openConfig = true, autoRelease = true } = {}) {
   const findButton = (label) => root.root.findAllByType("button").find((button) => visibleText(button) === label);
   const harness = {
     requests,
-    get select() { return root.root.findByType("select"); },
+    storedItems,
+    get select() { return root.root.findByProps({ "aria-label": "后端模型" }); },
     get connect() { return root.root.findAllByType("button").find((button) => button.props["aria-label"] === "连接会话" || button.children.includes("建会话")); },
-    get models() { return root.root.findAllByType("option").filter((option) => option.props.value).map((option) => option.props.value); },
+    get models() { return harness.select.findAllByType("option").filter((option) => option.props.value).map((option) => option.props.value); },
     get text() { return JSON.stringify(root.toJSON()); },
     get visibleText() { return visibleText(root.toJSON()); },
     get configButton() { return findButton("会话配置"); },
@@ -75,6 +82,12 @@ async function setup(t, { openConfig = true, autoRelease = true } = {}) {
     async openHistory() { await act(async () => { root.root.findByProps({ "aria-label": "历史会话" }).props.onClick(); }); },
     async sessionMode(value) { await act(async () => { root.root.findByProps({ name: "session-mode", value }).props.onChange(); }); },
     async selectHistory(id) { await act(async () => { root.root.findByProps({ name: "history-session", value: id }).props.onChange(); }); },
+    async selectConfig(id) { await act(async () => { root.root.findByProps({ "aria-label": "选择历史配置" }).props.onChange({ target: { value: id } }); }); },
+    async reload() {
+      await act(async () => { root.unmount(); });
+      await act(async () => { root = create(React.createElement(App)); });
+      await harness.openConfig();
+    },
     async refreshHistory() { await act(async () => { findButton("刷新列表").props.onClick(); }); },
     get configInputs() { return root.root.findAllByProps({ placeholder: "Token" }); },
     inputValue(placeholder) { return root.root.findByProps({ placeholder }).props.value; },
@@ -525,4 +538,79 @@ test("Skills management binds to actual session project and original backend eve
   assert.equal(h.requests[second].headers.Authorization, "Bearer draft-token");
   await h.reply(second, { projectPath: "/draft-project", revision: 0, installed: [], local: [] });
   assert.match(h.visibleText, /待连接项目：\/draft-project/);
+});
+
+test("configuration history restores last successful fields on reload without storing or restoring credentials", async (t) => {
+  const h = await setup(t);
+  await configureCustomSession(h, "/history-project");
+  await h.clickConnect();
+  const creation = h.requests.findLastIndex(request => request.url.endsWith("/sessions"));
+  await h.reply(creation, { id: "cached-session", projectPath: "/history-project", modelLabel: "custom/verified", resumed: true });
+  const raw = [...h.storedItems.values()].join("");
+  assert.match(raw, /history-project/);
+  assert.match(raw, /gateway.test/);
+  assert.match(raw, /org\/custom-model/);
+  assert.doesNotMatch(raw, /backend-token|session-secret|apiKey|llmApiKey|"token"/);
+  await h.reload();
+  assert.equal(h.inputValue("项目路径 或 git URL"), "/history-project");
+  assert.equal(h.inputValue("后端地址"), "http://127.0.0.1:8787");
+  assert.equal(h.inputValue("LLM BaseURL"), "http://gateway.test/v1");
+  assert.equal(h.inputValue("模型名"), "org/custom-model");
+  assert.equal(h.inputValue("Token"), "");
+  assert.equal(h.inputValue("LLM API Key（可选）"), "");
+  assert.equal(h.requests.filter(request => request.url.endsWith("/sessions") && request.method === "POST").length, 1, "restoring local configuration must not create a session");
+  await h.input("Token", "different-token");
+  await h.input("LLM API Key（可选）", "different-key");
+  await h.input("项目路径 或 git URL", "/draft-project");
+  const stored = JSON.parse([...h.storedItems.values()][0]);
+  await h.selectConfig(stored.entries[0].id);
+  assert.equal(h.inputValue("项目路径 或 git URL"), "/history-project");
+  assert.equal(h.inputValue("Token"), "");
+  assert.equal(h.inputValue("LLM API Key（可选）"), "");
+  await h.clickButton("清空配置记录");
+  assert.equal(h.storedItems.size, 0);
+  await h.reload();
+  assert.equal(h.inputValue("项目路径 或 git URL"), "");
+});
+
+test("failed connection does not become configuration history and blocked storage cannot fail a valid connection", async (t) => {
+  const h = await setup(t, { storageBlocked: true });
+  await configureCustomSession(h);
+  await h.clickConnect();
+  const first = h.requests.findLastIndex(request => request.url.endsWith("/sessions"));
+  await h.reply(first, { error: "model failed" }, 500);
+  assert.equal(h.storedItems.size, 0);
+  await h.clickConnect();
+  const retry = h.requests.findLastIndex(request => request.url.endsWith("/sessions"));
+  await h.reply(retry, { id: "valid-no-storage", projectPath: "/connected-project", modelLabel: "custom/model", resumed: true });
+  assert.equal(h.dialogs.length, 0, "storage failure must not turn a valid connection into failure");
+  assert.match(h.visibleText, /已连接/);
+  assert.equal(h.storedItems.size, 0);
+  await h.openConfig();
+  assert.match(h.visibleText, /本地存储.*不可用|无法保存.*本地/);
+});
+
+test("a failed connection is not recorded, and a restored backend model takes precedence over the backend default", async (t) => {
+  const h = await setup(t);
+  await h.input("项目路径 或 git URL", "/backend-project");
+  await h.input("Token", "backend-token");
+  await h.flushTimers();
+  await h.reply(h.requests.findLastIndex(request => request.url.endsWith("/models")), modelList);
+  await act(async () => h.select.props.onChange({ target: { value: "openai-codex/gpt-5" } }));
+  await h.clickConnect();
+  await h.reply(h.requests.findLastIndex(request => request.url.endsWith("/sessions")), { error: "failed to connect" }, 500);
+  assert.equal(h.storedItems.size, 0);
+  await h.clickConnect();
+  await h.reply(h.requests.findLastIndex(request => request.url.endsWith("/sessions")), { id: "backend-cached", projectPath: "/backend-project", modelLabel: "selected", resumed: true });
+  await h.reload();
+  assert.equal(h.inputValue("Token"), "");
+  assert.equal(h.select.props.disabled, true);
+  await h.input("Token", "new-backend-token");
+  await h.flushTimers();
+  await h.reply(h.requests.findLastIndex(request => request.url.endsWith("/models")), modelList);
+  assert.equal(h.select.props.value, "openai-codex/gpt-5");
+  await h.input("Token", "rotated-token");
+  await h.flushTimers();
+  await h.reply(h.requests.findLastIndex(request => request.url.endsWith("/models")), { ...modelList, models: [modelList.models[1]] });
+  assert.equal(h.select.props.value, "openai-codex/gpt-5-mini", "a model removed from backend must fall back to an available model");
 });
