@@ -28,6 +28,9 @@ export interface AnswerRecord {
   requestId: string;
   historyId: string;
   question: string;
+  /** Original request identity is retained when the answer also follows corrections. */
+  originalQuestion?: string;
+  steering?: Array<{ requestId: string; question: string }>;
   answer: string;
   status: "completed" | "error" | "aborted" | "interrupted";
   source: AnswerSource;

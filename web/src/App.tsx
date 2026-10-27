@@ -287,6 +287,11 @@ export default function App() {
         disabled={!chat.sessionId || connecting}
         sendingBlocked={chat.contextStale}
         streaming={chat.streaming}
+        scopeKey={chat.sessionId}
+        pendingMessages={chat.pendingMessages}
+        onQueue={chat.followUp}
+        onSteer={chat.steer}
+        onCancelPending={chat.cancelPending}
         onSend={chat.send}
         onStop={chat.stop}
       />

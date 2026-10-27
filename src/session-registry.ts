@@ -5,7 +5,9 @@ import { resolveProject } from "./project-resolver.js";
 import { SessionQueue } from "./session-queue.js";
 import { parseModelOptions, type SessionModelOptions } from "./llm-config.js";
 import { HistoryError, historyMessages, listProjectHistory, validateHistorySelection, type HistoryMessage } from "./session-history.js";
-import { getSessionSkills } from "./skills/runtime.js";
+import { getSessionSkills, applySessionSkillSteering, prepareSessionSkillSteering } from "./skills/runtime.js";
+import { applyMemorySteering } from "./memory/runtime.js";
+import { SessionMessages } from "./session-messages.js";
 import type { SkillSnapshot } from "./skills/types.js";
 
 export interface SessionEntry {
@@ -17,6 +19,7 @@ export interface SessionEntry {
   session: AgentSession;
   /** 串行执行、取消和关闭状态。 */
   queue: SessionQueue;
+  messages: SessionMessages;
 }
 
 const registry = new Map<string, SessionEntry>();
@@ -107,7 +110,12 @@ export async function openSession(opts: OpenSessionOptions): Promise<OpenSession
     const historyId = session.sessionManager.getSessionId();
     const resumed = selectedId !== undefined;
     activeHistory.add(historyKey(resolved.cwd, historyId));
-    const entry = { id, projectPath: resolved.cwd, modelLabel, historyId, resumed, session, queue: new SessionQueue(session) };
+    const queue = new SessionQueue(session);
+    const messages = new SessionMessages(session, queue, message => {
+      applyMemorySteering(session, message);
+      applySessionSkillSteering(session, message.question);
+    }, question => prepareSessionSkillSteering(session, question));
+    const entry = { id, projectPath: resolved.cwd, modelLabel, historyId, resumed, session, queue, messages };
     registry.set(id, entry);
     return sessionResult(entry);
   } catch (error) {
@@ -130,6 +138,7 @@ export async function closeSession(id: string): Promise<boolean> {
   if (!entry) return false;
   // Remove immediately so new requests cannot join a session being closed.
   registry.delete(id);
+  entry.messages.close();
   try {
     await entry.queue.close();
   } finally {

@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
@@ -13,7 +13,6 @@ import {
   isHistoryActive,
   listSessions,
   openSession,
-  runOnSession,
 } from "./session-registry.js";
 import { listModels } from "./models.js";
 import { runAsk, type AskEvent } from "./ask.js";
@@ -22,6 +21,7 @@ import { createMemoryRoutes } from "./memory-routes.js";
 import type { AskOptions } from "./ask.js";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { SessionQueue } from "./session-queue.js";
+import { PendingMessageCancelled } from "./session-messages.js";
 import { LlmConfigError, parseModelOptions } from "./llm-config.js";
 import { HistoryError, listProjectHistory, validateHistorySelection } from "./session-history.js";
 
@@ -103,7 +103,7 @@ function askFailure(error: unknown) {
 }
 function askStatus(error: unknown): ContentfulStatusCode {
   const status = (error as { status?: number } | undefined)?.status;
-  return ([400, 404, 409, 503].includes(status ?? 0) ? status : 500) as ContentfulStatusCode;
+  return ([400, 404, 409, 429, 503].includes(status ?? 0) ? status : 500) as ContentfulStatusCode;
 }
 
 // ---------------- App ----------------
@@ -186,16 +186,38 @@ export function createApp(token: string) {
 
   app.get("/sessions", (c) => c.json({ sessions: listSessions() }));
 
+  app.get("/sessions/:id/messages", (c) => {
+    const entry = getSession(c.req.param("id"));
+    return entry ? c.json(entry.messages.state()) : c.json({ error: "session not found" }, 404);
+  });
+  app.post("/sessions/:id/steer", async (c) => {
+    const entry = getSession(c.req.param("id"));
+    if (!entry) return c.json({ error: "session not found" }, 404);
+    let body: { question?: unknown; requestId?: unknown; targetRequestId?: unknown };
+    try { body = await c.req.json(); } catch { return c.json({ error: "invalid json body" }, 400); }
+    if (!body || typeof body.question !== "string" || typeof body.requestId !== "string" || typeof body.targetRequestId !== "string") return c.json({ error: "question、requestId 和 targetRequestId 必须是字符串" }, 400);
+    try { return c.json(entry.messages.steer({ id: body.requestId, question: body.question, targetRequestId: body.targetRequestId }), 202); }
+    catch (error) { return c.json({ error: askFailure(error).message }, askStatus(error)); }
+  });
+  app.delete("/sessions/:id/messages/:messageId", (c) => {
+    const entry = getSession(c.req.param("id"));
+    if (!entry) return c.json({ error: "session not found" }, 404);
+    try { return c.json(entry.messages.remove(c.req.param("messageId"))); }
+    catch (error) { return c.json({ error: askFailure(error).message }, askStatus(error)); }
+  });
+
   // 提问（默认 SSE 流式；?stream=false 返回 JSON）
   app.post("/sessions/:id/ask", async (c) => {
     const entry = getSession(c.req.param("id"));
     if (!entry) return c.json({ error: "session not found" }, 404);
 
-    let body: { question?: string; requestId?: string; reuse?: "auto" | "bypass" };
+    let body: { question?: string; requestId?: string; reuse?: "auto" | "bypass"; mode?: string };
     let options: AskOptions;
     try {
       body = await c.req.json();
       options = askOptions(body);
+      if (body.mode !== undefined && body.mode !== "followUp") throw new Error("invalid mode");
+      options.requestId ??= randomUUID();
     } catch {
       return c.json({ error: "invalid json body" }, 400);
     }
@@ -205,10 +227,10 @@ export function createApp(token: string) {
 
     if (!wantStream) {
       try {
-        const outcome = await runOnSession(
-          entry,
+        const outcome = await entry.messages.run(
+          { id: options.requestId!, question: body.question, reuse: options.reuse },
           (signal) => runAsk(entry.session, body.question!, undefined, signal, options),
-          c.req.raw.signal,
+          { signal: c.req.raw.signal },
         );
         return c.json({
           answer: outcome.answer,
@@ -227,16 +249,21 @@ export function createApp(token: string) {
       const controller = new AbortController();
       stream.onAbort(() => controller.abort());
       if (stream.aborted) controller.abort();
+      const unsubscribe = entry.messages.subscribe(state => { void write("queue", state); });
       try {
-        const outcome = await runOnSession(
-          entry,
+        const outcome = await entry.messages.run(
+          { id: options.requestId!, question: body.question!, reuse: options.reuse },
           (signal) => runAsk(entry.session, body.question!, sseHandler(write), signal, options),
-          controller.signal,
+          { signal: controller.signal,
+            onStarted: () => { void write("started", { requestId: options.requestId, question: body.question, revision: entry.messages.state().revision }); },
+            onSteeringApplied: message => { void write("steering_applied", message); },
+          },
         );
         await write("done", { modelLabel: entry.modelLabel, answer: outcome.answer, ...outcome.metadata });
       } catch (e) {
-        await write("error", askFailure(e));
-      }
+        if (e instanceof PendingMessageCancelled) await write("cancelled", { requestId: options.requestId });
+        else await write("error", askFailure(e));
+      } finally { unsubscribe(); }
     });
   });
 

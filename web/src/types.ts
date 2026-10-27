@@ -3,7 +3,9 @@ export type { AnswerMetadata, AnswerSource, FeedbackInput, FeedbackResult, Feedb
 import type { SkillPreview } from "../../src/skills/types";
 export type { SkillPreview, SkillVersion, SkillLibrary, SkillSnapshot, SkillConfirmation, SkillPatch } from "../../src/skills/types";
 
-export type SseEventName = "thinking" | "tool" | "text" | "done" | "error" | "skill_preview" | "skills_applied";
+export type { PendingSessionMessage, SessionMessageState, SteeringApplied } from "../../src/session-message-types";
+
+export type SseEventName = "thinking" | "tool" | "text" | "done" | "error" | "skill_preview" | "skills_applied" | "queue" | "started" | "cancelled" | "steering_applied";
 
 export interface ToolCall {
   name: string;

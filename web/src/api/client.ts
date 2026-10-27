@@ -1,4 +1,4 @@
-import type { FeedbackInput, FeedbackResult, KnowledgeItem, MemoryLibrary, ReviewInput } from "../types";
+import type { PendingSessionMessage, SessionMessageState, FeedbackInput, FeedbackResult, KnowledgeItem, MemoryLibrary, ReviewInput } from "../types";
 import { fetchEventSource } from "@microsoft/fetch-event-source";
 import type { ChatMessage, SseEventName, SkillLibrary, SkillPreview, SkillSnapshot, SkillConfirmation } from "../types";
 
@@ -131,9 +131,9 @@ export function askStream(
   question: string,
   signal: AbortSignal,
   onEvent: (event: SseEventName, data: unknown) => void,
-  options?: { requestId?: string; reuse?: "auto" | "bypass" },
+  options?: { requestId?: string; reuse?: "auto" | "bypass"; mode?: "followUp" },
 ): Promise<void> {
-  return fetchEventSource(`${config.baseUrl}/sessions/${sessionId}/ask`, {
+  return fetchEventSource(`${config.baseUrl}/sessions/${encodeURIComponent(sessionId)}/ask`, {
     method: "POST",
     headers: authHeaders(config),
     body: JSON.stringify({ question, ...options }),
@@ -153,6 +153,34 @@ export function askStream(
       throw err;
     },
   });
+}
+
+
+export async function getSessionMessages(config: ServerConfig, sessionId: string, signal?: AbortSignal): Promise<SessionMessageState> {
+  const response = await fetch(`${config.baseUrl}/sessions/${encodeURIComponent(sessionId)}/messages`, { headers: authHeaders(config), signal });
+  if (!response.ok) throw await responseError(response);
+  return response.json();
+}
+
+export interface SessionMessageResult {
+  message: PendingSessionMessage;
+  state: SessionMessageState;
+}
+
+export async function steerSession(config: ServerConfig, sessionId: string, input: { question: string; requestId: string; targetRequestId: string }): Promise<SessionMessageResult> {
+  const response = await fetch(`${config.baseUrl}/sessions/${encodeURIComponent(sessionId)}/steer`, {
+    method: "POST", headers: authHeaders(config), body: JSON.stringify(input),
+  });
+  if (!response.ok) throw await responseError(response);
+  return response.json();
+}
+
+export async function cancelSessionMessage(config: ServerConfig, sessionId: string, messageId: string): Promise<SessionMessageResult> {
+  const response = await fetch(`${config.baseUrl}/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(messageId)}`, {
+    method: "DELETE", headers: authHeaders(config),
+  });
+  if (!response.ok) throw await responseError(response);
+  return response.json();
 }
 
 
